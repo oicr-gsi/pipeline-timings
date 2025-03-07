@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on 
-
-@author: 
-"""
-
 import os
 import subprocess
 import json
