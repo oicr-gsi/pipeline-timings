@@ -1,19 +1,101 @@
-import json
-import csv
-import sys
+# -*- coding: utf-8 -*-
+"""
+Created on 
+
+@author: 
+"""
+
 import os
+import subprocess
+import json
+import re
+import sys
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import numpy as np
 
-def parse_json(json_file, workflow_metrics = None):
-    # Load JSON data from the provided file
-    with open(json_file, 'r') as file:
-        data = json.load(file)
+def extract_workflow_ids(data):
+    '''
+    Extracts workflow ids from a JSON file and returns it as a list. 
+    Note: The function first check to see if the data is in the form of a
+          dictionary or a list. 
 
-    # Identify the unique workflow and provisionFileOut iterations
+    Parameters
+    ----------
+    - The dataset in the form of a dictionary or a list. 
+    '''
+    workflow_ids = []
+
+    # Check if data is a dictionary or a list
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == 'workflow_id':
+                workflow_ids.append(value)
+            else:
+                workflow_ids.extend(extract_workflow_ids(value))
+    elif isinstance(data, list):
+        for item in data:
+            workflow_ids.extend(extract_workflow_ids(item))
+
+    return workflow_ids
+
+
+def query_mongodb(workflow_id):
+    '''
+    Queries workflow ids against a MongoDB Database and returns
+    the results as a dictionary.  
+
+    Parameters
+    ----------
+    - A list of workflow ids to search against the database. 
+    '''
+    query_str = '{"workflow_run_id": "' + str(workflow_id) + '"}'
+
+    # MongoDB export command using subprocess
+    command = [
+        "mongoexport",
+        "--host", "workflow-metrics-db.gsi.oicr.on.ca",
+        "--port", "27017",
+        "--username", "workflow_metrics_ro",
+        "--config", "/.mounts/labs/gsi/secrets/workflow-metrics-db.gsi_workflow_metrics_ro",
+        "--db", "workflow_metrics",
+        "--collection", "production_cromwell_workflow_metrics",
+        "--jsonArray",
+        "--query", query_str
+    ]
+    
+    try:
+        # Run mongoexport and capture the result
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
+        
+        # Parse the result from the command
+        data = json.loads(result.stdout)
+        
+        # Return the data from MongoDB for further processing
+        return data
+    except subprocess.CalledProcessError as e:
+        print(f"Error querying {workflow_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error while querying {workflow_id}: {e}")
+        return None
+
+
+def parse_json(data, workflow_metrics = None):
+    '''
+    Parses a dictionary to extract workflow metrics and compute the maximum wallclock_seconds for 'provisionFileOut'.
+    
+    Parameters
+    -----------
+    - The dictionary containing workflow metrics.
+    - An empty dataframe to which new rows of extracted workflow metrics will be appended. 
+
+    Returns
+    -------
+      A pandas dataframe containing workflow metrics, including the workflow name, start time, end time, 
+      wallclock seconds, workflow run ID, and the maximum wallclock seconds for 'provisionFileOut'.
+    '''
     unique_workflow = None
     provision_file_out_max_time = 0
 
@@ -45,18 +127,102 @@ def parse_json(json_file, workflow_metrics = None):
 
     return workflow_metrics
 
-def gantt_plot(workflow_metrics, html_file='wrt_gantt.html', png_file='wrt_gantt.png'):
-    custom_workflow_run = ['bamMergePreprocessing', 'mutect2', 'variantEffectPredictor', 'gridss', 'purple', 'delly', 'mavis', 'hrDetect', 'msisensor']
-    reversed_arr_1d = np.flip(custom_workflow_run)
 
-    # Convert start_time and end_time to datetime
+
+def add_arrows(metrics_df, dependencies):
+    '''
+    Creates a list of lines (arrows) linking the different workflows and showing the dependency between them.
+    
+    Parameters
+    -----------
+    - A pandas dataframe containing sorted workflow metrics ordered either by their start time or by their run order. 
+    - A dictionary where keys are workflow names and values are lists of workflows that depend on the key workflow. 
+    '''
+    arrows = []
+    for workflow, dependent_workflows in dependencies.items():
+        for dep in dependent_workflows:
+            workflow_rows = metrics_df[metrics_df['workflow_name'] == workflow]
+            dep_rows = metrics_df[metrics_df['workflow_name'] == dep]
+        
+            for _, workflow_row in workflow_rows.iterrows():
+                for _, dep_row in dep_rows.iterrows():
+                    workflow_end_time = workflow_row['end_time']
+                    dep_start_time = dep_row['start_time']
+                
+                    arrows.append(go.Scatter(
+                        x=[workflow_end_time, dep_start_time], 
+                        y=[workflow_row['workflow_name_id'], dep_row['workflow_name_id']], 
+                        mode='lines',
+                        line=dict(color='black', width=1, dash='dot'),
+                        showlegend=False
+                    ))
+
+    return arrows
+
+
+
+def update_axes(fig, metrics_df, run_order=None):
+    '''
+    Updates the axes of a given figure to display y axis values either based on run order or workflow start time. 
+    
+    Parameters
+    -----------
+    - The figure object to which the axes will be updated. 
+    - A pandas dataframe containing sorted workflow metrics ordered either by their start time or by their run order. 
+    - A list of workflow run orders.
+    '''
+    if run_order:
+        tickvals = metrics_df['workflow_name_id'].unique()
+        ticktext = [workflow for workflow in run_order for _ in range(len(metrics_df[metrics_df['workflow_name'] == workflow]))]
+    else:
+        tickvals = [workflow for workflow in metrics_df['workflow_name_id'].unique()]
+        ticktext = [workflow.split('-')[0] for workflow in metrics_df['workflow_name_id']]
+
+    fig.update_yaxes(
+        mirror=True,
+        ticks='outside',
+        showline=True,
+        linecolor='black',
+        gridcolor='lightgrey',
+        autorange='reversed', 
+        title="Workflow Name",
+        tickmode='array',
+        tickvals=tickvals,
+        ticktext=ticktext
+    )
+    fig.update_xaxes(
+        mirror=True,
+        ticks='outside',
+        showline=True,
+        linecolor='black',
+        gridcolor='lightgrey',
+        title="Time"
+    )
+
+
+
+def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='wrt_gantt_v2.html'):
+    '''
+    Generates two interactive Gantt charts of workflow runtime. 
+
+    Note: The function saves the Gantt charts as HTML files. The first chart (`html_file_1`) shows workflows sorted by their start times, 
+    while the second chart (`html_file_2`) shows them sorted by their run order. 
+
+    Parameters
+    -----------
+    - A pandas dataframe containing the workflow metrics. 
+    - Two HTML files where the Gantt Charts will be saved. 
+    '''
+    workflow_run_order = ['bamMergePreprocessing', 'mutect2', 'variantEffectPredictor', 'gridss', 'purple', 'delly', 'mavis', 'hrDetect', 'msisensor']
+    
+    # Convert start_time and end_time to datetime format  
     workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'])
     workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'])
+   
 
-
-    # Sort based on start times
+    # Sort based on start times and create a new column that concatenates workflow names and their run IDs.
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
-    reversed_arr_2d = np.flip(metrics_sorted.sort_values('start_time')['workflow_name'].tolist())
+    metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
     # Define Dependencies 
     dependencies = { 
@@ -67,109 +233,90 @@ def gantt_plot(workflow_metrics, html_file='wrt_gantt.html', png_file='wrt_gantt
         'purple': ['hrDetect']
     }
 
-    # Create the Gantt chart with Plotly Express
-    fig = px.timeline(metrics_sorted, 
-                  x_start='start_time', 
-                  x_end='end_time', 
-                  y='workflow_name', 
-                  color='workflow_run_id',
-                  title='Gantt Chart of Workflow Run Times'
+    fig_1 = px.timeline(metrics_sorted, 
+                        x_start='start_time', 
+                        x_end='end_time', 
+                        y='workflow_name_id', 
+                        color='workflow_run_id',
     )
+    
+    arrows = add_arrows(metrics_sorted, dependencies)
+    fig_1.add_traces(arrows)
 
-    # Prepare arrows based on dependencies (from one workflow to the next)
-    arrows = []
-    for workflow, dependent_workflows in dependencies.items():
-        for dep in dependent_workflows:
-            if workflow in metrics_sorted['workflow_name'].values and dep in metrics_sorted['workflow_name'].values:
-                # Get the end time of the current workflow (workflow)
-                workflow_end_time = metrics_sorted[metrics_sorted['workflow_name'] == workflow]['end_time'].iloc[0]
-                # Get the start time of the dependent workflow (dep)
-                dep_start_time = metrics_sorted[metrics_sorted['workflow_name'] == dep]['start_time'].iloc[0]
-            
-                # Create an arrow from the end of the workflow to the start of the dependent workflow
-                arrows.append(go.Scatter(
-                    x=[workflow_end_time, dep_start_time],  # From end of one to start of another
-                    y=[workflow, dep],  # Corresponding workflow names on the y-axis
-                    mode='lines',
-                    line=dict(color='black', width=1, dash='dot'),
-                    showlegend=False
-                ))
+    update_axes(fig_1, metrics_sorted)
 
-    # Add arrows to the figure
-    fig.add_traces(arrows)
-
-    # Update layout to ensure proper styling and axes
-    fig.update_xaxes(
-        mirror=True,
-        ticks='outside',
-        showline=True,
-        linecolor='black',
-        gridcolor='lightgrey',
-        title="Time"
-    )
-
-    fig.update_yaxes(
-        mirror=True,
-        ticks='outside',
-        showline=True,
-        linecolor='black',
-        gridcolor='lightgrey',
-        autorange='reversed',
-        title="Workflow Name",
-        ticktext=metrics_sorted['workflow_name']
-    )
-
-    # Set up dropdown menu options based on whether all custom workflows are present
-    updatemenus = [
-        {
-            'buttons': [
-                {
-                    'args': [{'yaxis': {'categoryorder': 'array', 
-                                    'categoryarray': reversed_arr_2d}}],
-                    'label': 'By Start Time',
-                    'method': 'relayout'
-                }
-            ],
-            'direction': 'down',
-            'pad': {'r': 10, 't': 10},
-            'showactive': True,
-            'type': 'dropdown',
-            'x': 0.17,
-            'xanchor': 'left',
-            'y': 1.15,
-            'yanchor': 'top'
-        }
-    ]
-
-    # Add second dropdown option only if all custom workflows exist in the dataset
-    existing_workflows = metrics_sorted['workflow_name'].isin(custom_workflow_run).all()
-
-    if existing_workflows:
-        updatemenus[0]['buttons'].append(
-            {
-                'args': [{'yaxis': {'categoryorder': 'array', 
-                                'categoryarray': reversed_arr_1d}}],
-                'label': 'By Workflow Run',
-                'method': 'relayout'
-            }
-        )
-
-    fig.update_layout(
+    fig_1.update_layout(
+        title='Interactive Gantt Chart of Workflow Runtime',
+        title_x=0.5,
         plot_bgcolor='white',
         showlegend=False,
-        updatemenus=updatemenus
-    )   
+        annotations=[
+                {
+                    'text': "Sorted by run start time", 
+                    'x': 0.45, 
+                    'y': 1.04, 
+                    'xref': 'paper',
+                    'yref': 'paper',
+                    'showarrow': False,
+                    'font': {'size': 14, 'color': 'grey'},  
+                    'align': 'center' 
+                }
+            ]
+        )   
+    fig_1.write_html(html_file_1)
+    print(f"Workflow run metrics by start time saved to {html_file_1}")
 
-    # Saving plot in HTML format
-    fig.write_html(html_file)
+    # Modify the 'y axis' values based on the run order and sort metrics based on this order
+    order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
+    metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
+    metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
 
-    # Saving in PNG format
-    fig.write_image(png_file)
+    fig_2 = px.timeline(metrics_sorted_run_order, 
+                        x_start='start_time', 
+                        x_end='end_time', 
+                        y='workflow_name_id', 
+                        color='workflow_run_id',
+    )
     
+    arrows = add_arrows(metrics_sorted_run_order, dependencies)
+    fig_2.add_traces(arrows)
+
+    update_axes(fig_2, metrics_sorted_run_order, workflow_run_order)
+
+    fig_2.update_layout(
+        title='Interactive Gantt Chart of Workflow Runtime',
+        title_x=0.5,
+        plot_bgcolor='white',
+        showlegend=False,
+        annotations=[
+                {
+                    'text': "Sorted by run order", 
+                    'x': 0.45, 
+                    'y': 1.04, 
+                    'xref': 'paper',
+                    'yref': 'paper',
+                    'showarrow': False,
+                    'font': {'size': 14, 'color': 'grey'},  
+                    'align': 'center' 
+                }
+            ]
+        )
+    fig_2.write_html(html_file_2)
+    print(f"Workflow run metrics by run order saved to {html_file_2}")
 
 
 def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
+    '''
+    Saves workflow metrics data generated from the parse_json function to a CSV file. 
     
+    Note: If the file already exists, the function appends the data without writing the header again. 
+    If the file does not exist, the data is written with the header.
+
+    Parameters
+    -----------
+    - The pandas dataframe containing workflow metrics. 
+    - An optional CSV filename/path where the metrics are to be stored. 
+    '''
     # Check if CSV file already exists
     file_exists = os.path.isfile(csv_file)
         
@@ -183,20 +330,55 @@ def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
 
         
 
+def process_json_file(json_file):
+    '''
+    Processes an input JSON file and calls the extract workflow ids, and 
+    query mongodb functions. 
+
+    Parameters
+    ----------
+    - Path to an input JSON file that needs to be processed to extract workflow ids.  
+    '''
+    # Check if file exists
+    if not os.path.isfile(json_file):
+        print(f"File {json_file} not found.")
+        return
+
+    # Load JSON data
+    try:
+        with open(json_file, 'r') as file:
+            input_data = json.load(file)
+    except Exception as e:
+        print(f"Error loading JSON file: {e}")
+        return
+
+    # Extract workflow IDs
+    workflow_ids = extract_workflow_ids(input_data)
+
+    # Check if there are any workflow IDs extracted
+    if not workflow_ids:
+        print("No workflow IDs found.")
+        return
+    else:
+        workflow_metrics = None
+        for workflow_id in workflow_ids:
+            print(f"Extracting workflow metrics for workflow_id: {workflow_id}")
+            data = query_mongodb(workflow_id)
+            if data:
+                workflow_metrics = parse_json(data, workflow_metrics)
+
+        # Generate gantt chart and CSV report if metrics are available
+        if workflow_metrics is not None:
+            gantt_plot(workflow_metrics)
+            generate_csv(workflow_metrics)
+        
+
 if __name__ == "__main__":
-    json_dir = 'Extracted_Metrics'
-    json_files = [f for f in os.listdir(json_dir) if f.endswith('.json')]
-
-    workflow_metrics = None
-
-    for file in json_files:
-        json_file = os.path.join(json_dir, file)
-        workflow_metrics = parse_json(json_file, workflow_metrics)
-
-    if workflow_metrics is not None:
-        gantt_plot(workflow_metrics)
-        generate_csv(workflow_metrics)
-
+    if len(sys.argv) < 2:
+        print("Usage: python script.py <path_to_json_file>")
+    else:
+        json_file = sys.argv[1]
+        process_json_file(json_file)
 
 
 
