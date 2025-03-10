@@ -368,7 +368,7 @@ def process_json_file(json_file):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python script.py <path_to_json_file>")
+        print("Usage: python3 workflow_rt.py <path_to_json_file>")
     else:
         json_file = sys.argv[1]
         process_json_file(json_file)
