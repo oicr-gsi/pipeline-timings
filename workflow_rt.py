@@ -6,6 +6,7 @@ import sys
 import argparse
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 import plotly.graph_objects as go
 from datetime import datetime
 
@@ -138,10 +139,7 @@ def load_config(config_file):
     with open(config_file, 'r') as file:
         config = json.load(file)
 
-    workflow_run_order = config_data.get('order_key', [])
-    dependencies = config_data.get('dependency_key', {})
-    
-    return workflow_run_order, dependencies
+    return config['workflow_run_order'], config['dependencies']
 
 
 def add_arrows(metrics_df, dependencies):
@@ -214,30 +212,30 @@ def update_axes(fig, metrics_df, run_order=None):
     )
 
 
-def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='wrt_gantt_v2.html', config_file=None):
+def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png', png_file_2='wrt_gantt_v2.png'):
     '''
-    Generates two interactive Gantt charts of workflow runtime. 
+    Generates two Gantt charts of workflow runtime. 
 
-    Note: The function saves the Gantt charts as HTML files. The first chart (`html_file_1`) shows workflows sorted by their start times, 
-    while the second chart (`html_file_2`) shows them sorted by their run order. 
+    Note: The function saves the Gantt charts as PNG files. The first chart (`png_file_1`) shows workflows sorted by their start times, 
+    while the second chart (`png_file_2`) shows them sorted by their run order. 
 
     Parameters
     -----------
     - A pandas dataframe containing the workflow metrics. 
-    - Two HTML files where the Gantt Charts will be saved. 
+    - Two PNG files where the Gantt Charts will be saved. 
     '''
     generate_second_chart = False
-    workflow_run_order = []
-    dependencies = {}
 
     # Convert start_time and end_time to datetime format  
-    workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'])
-    workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'])
-   
-
+    workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'], errors = 'coerce')
+    workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'], errors = 'coerce')
+    
     # Sort based on start times and create a new column that concatenates workflow names and their run IDs.
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
+
+    print(metrics_sorted.head())
+    print(metrics_sorted.columns)
 
     fig_1 = px.timeline(metrics_sorted, 
                         x_start='start_time', 
@@ -276,8 +274,8 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
                 }
             ]
         )   
-    fig_1.write_html(html_file_1)
-    print(f"Workflow run metrics by start time saved to {html_file_1}")
+    fig_1.write_image(png_file_1)
+    print(f"Workflow run metrics by start time saved to {png_file_1}")
 
     # Modify the 'y axis' values based on the run order and sort metrics based on this order
     if generate_second_chart:
@@ -315,8 +313,8 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
                 }
             ]
         )
-        fig_2.write_html(html_file_2)
-        print(f"Workflow run metrics by run order saved to {html_file_2}")
+        fig_2.write_image(png_file_2)
+        print(f"Workflow run metrics by run order saved to {png_file_2}")
 
 
 def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
