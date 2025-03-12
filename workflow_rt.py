@@ -254,7 +254,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
     update_axes(fig_1, metrics_sorted)
 
     fig_1.update_layout(
-        title='Interactive Gantt Chart of Workflow Runtime',
+        title='Gantt Chart of Workflow Runtime',
         title_x=0.5,
         plot_bgcolor='white',
         showlegend=False,
@@ -262,7 +262,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
                 {
                     'text': "Sorted by run start time", 
                     'x': 0.45, 
-                    'y': 1.05, 
+                    'y': 1.06, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
@@ -293,7 +293,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
         update_axes(fig_2, metrics_sorted_run_order, workflow_run_order)
 
         fig_2.update_layout(
-            title='Interactive Gantt Chart of Workflow Runtime',
+            title='Gantt Chart of Workflow Runtime',
             title_x=0.5,
             plot_bgcolor='white',
             showlegend=False,
@@ -301,7 +301,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
                 {
                     'text': "Sorted by run order", 
                     'x': 0.45, 
-                    'y': 1.05, 
+                    'y': 1.06, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
@@ -384,7 +384,7 @@ def process_json_file(json_file, config_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description = 'Generate interactive gantt charts for workflow metrics'
+        description = 'Generate gantt charts for workflow metrics'
     )
 
     # Add the argument for the input JSON file and the workflow configuration file
@@ -398,7 +398,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--config',
         type = str,
-        help = 'Path to the workflow configuration file. [Optional]',
+        help = 'Path to the workflow configuration file containing run order and dependencies. [Optional]',
         required = False
     )
 
