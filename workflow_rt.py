@@ -234,9 +234,6 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
-    print(metrics_sorted.head())
-    print(metrics_sorted.columns)
-
     fig_1 = px.timeline(metrics_sorted, 
                         x_start='start_time', 
                         x_end='end_time', 
