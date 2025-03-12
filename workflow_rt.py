@@ -3,6 +3,7 @@ import subprocess
 import json
 import re
 import sys
+import argparse
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -121,6 +122,27 @@ def parse_json(data, workflow_metrics = None):
     return workflow_metrics
 
 
+def load_config(config_file):
+    '''
+    Loads the workflow run order and dependencies from a JSON file. 
+
+    Parameters
+    ----------
+    - A path to the JSON workflow configuration file. 
+
+    Returns
+    -------
+    - A List of workflows in the specified run order.
+    - A Dictionary mapping workflow names to their dependencies.
+    '''
+    with open(config_file, 'r') as file:
+        config = json.load(file)
+
+    workflow_run_order = config_data.get('order_key', [])
+    dependencies = config_data.get('dependency_key', {})
+    
+    return workflow_run_order, dependencies
+
 
 def add_arrows(metrics_df, dependencies):
     '''
@@ -151,7 +173,6 @@ def add_arrows(metrics_df, dependencies):
                     ))
 
     return arrows
-
 
 
 def update_axes(fig, metrics_df, run_order=None):
@@ -193,7 +214,6 @@ def update_axes(fig, metrics_df, run_order=None):
     )
 
 
-
 def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='wrt_gantt_v2.html'):
     '''
     Generates two interactive Gantt charts of workflow runtime. 
@@ -206,8 +226,12 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
     - A pandas dataframe containing the workflow metrics. 
     - Two HTML files where the Gantt Charts will be saved. 
     '''
-    workflow_run_order = ['bamMergePreprocessing', 'mutect2', 'variantEffectPredictor', 'gridss', 'purple', 'delly', 'mavis', 'hrDetect', 'msisensor']
-    
+    if config_file:
+        workflow_run_order, dependencies = load_config(config_file)
+        generate_second_chart = True
+    else:
+        generate_second_chart = False
+
     # Convert start_time and end_time to datetime format  
     workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'])
     workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'])
@@ -217,15 +241,6 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
-    # Define Dependencies 
-    dependencies = { 
-        'bamMergePreprocessing': ['mutect2', 'gridss', 'delly', 'msisensor'],
-        'mutect2': ['variantEffectPredictor', 'purple', 'hrDetect'],
-        'delly': ['mavis'],
-        'gridss': ['purple', 'hrDetect'],
-        'purple': ['hrDetect']
-    }
-
     fig_1 = px.timeline(metrics_sorted, 
                         x_start='start_time', 
                         x_end='end_time', 
@@ -233,8 +248,9 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
                         color='workflow_run_id',
     )
     
-    arrows = add_arrows(metrics_sorted, dependencies)
-    fig_1.add_traces(arrows)
+    if config_file:
+        arrows = add_arrows(metrics_sorted, dependencies)
+        fig_1.add_traces(arrows)
 
     update_axes(fig_1, metrics_sorted)
 
@@ -247,7 +263,7 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
                 {
                     'text': "Sorted by run start time", 
                     'x': 0.45, 
-                    'y': 1.04, 
+                    'y': 1.02, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
@@ -260,32 +276,33 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
     print(f"Workflow run metrics by start time saved to {html_file_1}")
 
     # Modify the 'y axis' values based on the run order and sort metrics based on this order
-    order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
-    metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
-    metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
+    if generate_second_chart:
+        order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
+        metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
+        metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
 
-    fig_2 = px.timeline(metrics_sorted_run_order, 
+        fig_2 = px.timeline(metrics_sorted_run_order, 
                         x_start='start_time', 
                         x_end='end_time', 
                         y='workflow_name_id', 
                         color='workflow_run_id',
-    )
+        )
     
-    arrows = add_arrows(metrics_sorted_run_order, dependencies)
-    fig_2.add_traces(arrows)
+        arrows = add_arrows(metrics_sorted_run_order, dependencies)
+        fig_2.add_traces(arrows)
 
-    update_axes(fig_2, metrics_sorted_run_order, workflow_run_order)
+        update_axes(fig_2, metrics_sorted_run_order, workflow_run_order)
 
-    fig_2.update_layout(
-        title='Interactive Gantt Chart of Workflow Runtime',
-        title_x=0.5,
-        plot_bgcolor='white',
-        showlegend=False,
-        annotations=[
+        fig_2.update_layout(
+            title='Interactive Gantt Chart of Workflow Runtime',
+            title_x=0.5,
+            plot_bgcolor='white',
+            showlegend=False,
+            annotations=[
                 {
                     'text': "Sorted by run order", 
                     'x': 0.45, 
-                    'y': 1.04, 
+                    'y': 1.02, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
@@ -294,8 +311,8 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
                 }
             ]
         )
-    fig_2.write_html(html_file_2)
-    print(f"Workflow run metrics by run order saved to {html_file_2}")
+        fig_2.write_html(html_file_2)
+        print(f"Workflow run metrics by run order saved to {html_file_2}")
 
 
 def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
@@ -323,7 +340,7 @@ def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
 
         
 
-def process_json_file(json_file):
+def process_json_file(json_file, config_file):
     '''
     Processes an input JSON file and calls the extract workflow ids, and 
     query mongodb functions. 
@@ -362,16 +379,41 @@ def process_json_file(json_file):
 
         # Generate gantt chart and CSV report if metrics are available
         if workflow_metrics is not None:
-            gantt_plot(workflow_metrics)
+            gantt_plot(workflow_metrics, config_file)
             generate_csv(workflow_metrics)
         
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 workflow_rt.py <path_to_json_file>")
+    parser = argparse.ArgumentParser(
+        description = 'Generate interactive gantt charts for workflow metrics'
+    )
+
+    # Add the argument for the input JSON file and the workflow configuration file
+    parser.add_argument(
+        '-i', '--input',
+        type = str,
+        help = 'Path to the input JSON file containing workflow IDs',
+        required = True
+    )
+
+    parser.add_argument(
+        '--config',
+        type = str,
+        help = 'Path to the workflow configuration file. [Optional]',
+        required = False
+    )
+
+    # Add custom message to show usage
+    parser.epilog = '''
+    Example Usage: python3 workflow_rt.py -i /path/to/input/JSON 
+    '''
+
+    # Parse arguments
+    args = parser.parse_args()
+    json_file = args.input
+
+    if len(vars(args)) == 0:
+        parser.print_help()
+        exit(0)
     else:
-        json_file = sys.argv[1]
-        process_json_file(json_file)
-
-
-
+        process_json_file(json_file, config_file = args.config)
