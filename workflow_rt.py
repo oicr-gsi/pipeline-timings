@@ -214,7 +214,7 @@ def update_axes(fig, metrics_df, run_order=None):
     )
 
 
-def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='wrt_gantt_v2.html'):
+def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='wrt_gantt_v2.html', config_file=None):
     '''
     Generates two interactive Gantt charts of workflow runtime. 
 
@@ -226,11 +226,9 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
     - A pandas dataframe containing the workflow metrics. 
     - Two HTML files where the Gantt Charts will be saved. 
     '''
-    if config_file:
-        workflow_run_order, dependencies = load_config(config_file)
-        generate_second_chart = True
-    else:
-        generate_second_chart = False
+    generate_second_chart = False
+    workflow_run_order = []
+    dependencies = {}
 
     # Convert start_time and end_time to datetime format  
     workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'])
@@ -249,9 +247,15 @@ def gantt_plot(workflow_metrics, html_file_1='wrt_gantt_v1.html', html_file_2='w
     )
     
     if config_file:
+        #Generate the second plot and add dependency links only if workflow dependencies and run order are provided
+        workflow_run_order, dependencies = load_config(config_file)
+        generate_second_chart = True
+
+        #Add dependency links to first plot
         arrows = add_arrows(metrics_sorted, dependencies)
         fig_1.add_traces(arrows)
 
+        
     update_axes(fig_1, metrics_sorted)
 
     fig_1.update_layout(
