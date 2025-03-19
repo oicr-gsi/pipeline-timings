@@ -146,7 +146,7 @@ def gantt_plot(workflow_metrics, config_file=None, html_file_1='wrt_gantt_v1.htm
                 {
                     'text': "Sorted by run start time", 
                     'x': 0.45, 
-                    'y': 1.02, 
+                    'y': 1.06, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
@@ -184,7 +184,7 @@ def gantt_plot(workflow_metrics, config_file=None, html_file_1='wrt_gantt_v1.htm
                 {
                     'text': "Sorted by run order", 
                     'x': 0.45, 
-                    'y': 1.04, 
+                    'y': 1.06, 
                     'xref': 'paper',
                     'yref': 'paper',
                     'showarrow': False,
