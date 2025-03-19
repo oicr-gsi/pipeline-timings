@@ -11,6 +11,7 @@ On your command line load the module `pipeline-rt` [Current available version is
 ```
 module load pipeline-rt
 ```
+This downloads the two `.py` scripts in the repository and places them in the `share/` folder. Furthermore, it loads all required python libraries and makes the `workflow_rt.py` script available in the path to generate workflow run time diagrams. 
 
 ## Usage ##
 
