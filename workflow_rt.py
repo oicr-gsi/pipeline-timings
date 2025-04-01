@@ -10,7 +10,7 @@ import plotly.io as pio
 import plotly.graph_objects as go
 from datetime import datetime
 
-def extract_workflow_ids(data: Union[dict, list]) -> List[str]:
+def extract_workflow_ids(data):
     '''
     Extracts workflow ids from a dictionary or list and returns them as a list.
 
@@ -40,7 +40,7 @@ def extract_workflow_ids(data: Union[dict, list]) -> List[str]:
     return workflow_ids
 
 
-def query_mongodb(workflow_ids: List[str]) -> Optional[Dict[str, dict]]:
+def query_mongodb(workflow_ids):
     '''
     Queries workflow ids against a MongoDB Database and returns the results as a dictionary.
 
@@ -80,7 +80,7 @@ def query_mongodb(workflow_ids: List[str]) -> Optional[Dict[str, dict]]:
     return None
 
 
-def parse_json(data: List[dict], workflow_metrics: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def parse_json(data, workflow_metrics=None):
     '''
     Parses a dictionary to extract workflow metrics and compute the maximum wallclock_seconds for 'provisionFileOut'.
 
@@ -127,7 +127,7 @@ def parse_json(data: List[dict], workflow_metrics: Optional[pd.DataFrame] = None
     return workflow_metrics
 
 
-def load_config(config_file: str) -> Tuple[List[str], Dict[str, List[str]]]:
+def load_config(config_file):
     '''
     Loads the workflow run order and dependencies from a JSON file.
 
@@ -147,7 +147,7 @@ def load_config(config_file: str) -> Tuple[List[str], Dict[str, List[str]]]:
     return config['workflow_run_order'], config['dependencies']
 
 
-def add_arrows(metrics_df: pd.DataFrame, dependencies: Dict[str, List[str]]) -> List[go.Scatter]:
+def add_arrows(metrics_df, dependencies):
     '''
     Creates a list of lines (arrows) linking the different workflows and showing the dependency between them.
 
@@ -182,7 +182,7 @@ def add_arrows(metrics_df: pd.DataFrame, dependencies: Dict[str, List[str]]) -> 
     return arrows
 
 
-def update_axes(fig: go.Figure, metrics_df: pd.DataFrame, run_order: Optional[List[str]] = None) -> None:
+def update_axes(fig, metrics_df, run_order=None):
     '''
     Updates the axes of a given figure to display y axis values either based on run order or workflow start time.
 
@@ -224,7 +224,7 @@ def update_axes(fig: go.Figure, metrics_df: pd.DataFrame, run_order: Optional[Li
     )
 
 
-def gantt_plot(workflow_metrics: pd.DataFrame, config_file: Optional[str] = None, png_file_1: str = 'wrt_gantt_v1.png', png_file_2: str = 'wrt_gantt_v2.png') -> None:
+def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png', png_file_2='wrt_gantt_v2.png'):
     '''
     Generates two Gantt charts of workflow runtime and saves them as PNG files.
 
@@ -329,7 +329,7 @@ def gantt_plot(workflow_metrics: pd.DataFrame, config_file: Optional[str] = None
         print(f"Workflow run metrics by run order saved to {png_file_2}")
 
 
-def generate_csv(workflow_metrics: pd.DataFrame, csv_file: str = 'workflow_report.csv') -> None:
+def generate_csv(workflow_metrics, csv_file='workflow_report.csv'):
     '''
     Saves workflow metrics data to a CSV file.
 
@@ -350,7 +350,7 @@ def generate_csv(workflow_metrics: pd.DataFrame, csv_file: str = 'workflow_repor
 
         
 
-def process_input_data(input_file: str, config_file: Optional[str] = None) -> None:
+def process_input_data(input_file, config_file=None):
     '''
     Processes an input JSON or Text file to retrieve workflow run ids.
 
