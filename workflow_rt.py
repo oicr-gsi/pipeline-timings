@@ -10,15 +10,19 @@ import plotly.io as pio
 import plotly.graph_objects as go
 from datetime import datetime
 
-def extract_workflow_ids(data):
+def extract_workflow_ids(data: Union[dict, list]) -> List[str]:
     '''
-    Extracts workflow ids from a JSON file and returns it as a list. 
-    Note: The function first check to see if the data is in the form of a
-          dictionary or a list. 
+    Extracts workflow ids from a dictionary or list and returns them as a list.
 
     Parameters
     ----------
-    - The dataset in the form of a dictionary or a list. 
+    data : Union[dict, list]
+        The dataset in the form of a dictionary or a list.
+
+    Returns
+    -------
+    List[str]
+        A list of workflow ids.
     '''
     workflow_ids = []
 
@@ -36,18 +40,21 @@ def extract_workflow_ids(data):
     return workflow_ids
 
 
-def query_mongodb(workflow_id):
+def query_mongodb(workflow_ids: List[str]) -> Optional[Dict[str, dict]]:
     '''
-    Queries workflow ids against a MongoDB Database and returns
-    the results as a dictionary.  
+    Queries workflow ids against a MongoDB Database and returns the results as a dictionary.
 
     Parameters
     ----------
-    - A list of workflow ids to search against the database. 
-    '''
-    query_str = '{"workflow_run_id": "' + str(workflow_id) + '"}'
+    workflow_ids : List[str]
+        A list of workflow ids to search against the database.
 
-    # MongoDB export command using subprocess
+    Returns
+    -------
+    Optional[Dict[str, dict]]
+        A dictionary containing the results, or None if an error occurred. 
+    '''
+    query_str = '{"workflow_run_id": {"$in": ' + json.dumps(workflow_ids) + '}}'
     command = [
         "mongoexport",
         "--host", "workflow-metrics-db.gsi.oicr.on.ca",
@@ -63,33 +70,31 @@ def query_mongodb(workflow_id):
     try:
         # Run mongoexport and capture the result
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
-        
-        # Parse the result from the command
-        data = json.loads(result.stdout)
-        
-        # Return the data from MongoDB for further processing
-        return data
+        workflow_entry = json.loads(result.stdout)
+        return {entry['workflow_run_id']: entry for entry in workflow_entry}
     except subprocess.CalledProcessError as e:
-        print(f"Error querying {workflow_id}: {e}")
-        return None
+        print(f"Error querying workflows: {e}")
     except Exception as e:
-        print(f"Unexpected error while querying {workflow_id}: {e}")
-        return None
+        print(f"Unexpected error while querying workflows: {e}")
+    
+    return None
 
 
-def parse_json(data, workflow_metrics = None):
+def parse_json(data: List[dict], workflow_metrics: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     '''
     Parses a dictionary to extract workflow metrics and compute the maximum wallclock_seconds for 'provisionFileOut'.
-    
+
     Parameters
-    -----------
-    - The dictionary containing workflow metrics.
-    - An empty dataframe to which new rows of extracted workflow metrics will be appended. 
+    ----------
+    data : List[dict]
+        The dictionary containing workflow metrics.
+    workflow_metrics : Optional[pd.DataFrame]
+        An empty dataframe to which new rows of extracted workflow metrics will be appended.
 
     Returns
     -------
-      A pandas dataframe containing workflow metrics, including the workflow name, start time, end time, 
-      wallclock seconds, workflow run ID, and the maximum wallclock seconds for 'provisionFileOut'.
+    pd.DataFrame
+        A pandas dataframe containing workflow metrics.
     '''
     unique_workflow = None
     provision_file_out_max_time = 0
@@ -101,8 +106,7 @@ def parse_json(data, workflow_metrics = None):
         if workflow_name != 'provisionFileOut':
             unique_workflow = workflow
         else:
-            if wallclock_seconds > provision_file_out_max_time:
-                provision_file_out_max_time = wallclock_seconds
+            provision_file_out_max_time = max(provision_file_out_max_time, wallclock_seconds)
 
     if unique_workflow:
         row = {
@@ -123,18 +127,19 @@ def parse_json(data, workflow_metrics = None):
     return workflow_metrics
 
 
-def load_config(config_file):
+def load_config(config_file: str) -> Tuple[List[str], Dict[str, List[str]]]:
     '''
-    Loads the workflow run order and dependencies from a JSON file. 
+    Loads the workflow run order and dependencies from a JSON file.
 
     Parameters
     ----------
-    - A path to the JSON workflow configuration file. 
+    config_file : str
+        A path to the JSON workflow configuration file.
 
     Returns
     -------
-    - A List of workflows in the specified run order.
-    - A Dictionary mapping workflow names to their dependencies.
+    Tuple[List[str], Dict[str, List[str]]]
+        A list of workflows in the specified run order and a dictionary mapping workflow names to their dependencies.
     '''
     with open(config_file, 'r') as file:
         config = json.load(file)
@@ -142,14 +147,21 @@ def load_config(config_file):
     return config['workflow_run_order'], config['dependencies']
 
 
-def add_arrows(metrics_df, dependencies):
+def add_arrows(metrics_df: pd.DataFrame, dependencies: Dict[str, List[str]]) -> List[go.Scatter]:
     '''
     Creates a list of lines (arrows) linking the different workflows and showing the dependency between them.
-    
+
     Parameters
-    -----------
-    - A pandas dataframe containing sorted workflow metrics ordered either by their start time or by their run order. 
-    - A dictionary where keys are workflow names and values are lists of workflows that depend on the key workflow. 
+    ----------
+    metrics_df : pd.DataFrame
+        A pandas dataframe containing sorted workflow metrics.
+    dependencies : Dict[str, List[str]]
+        A dictionary where keys are workflow names and values are lists of workflows that depend on the key workflow.
+
+    Returns
+    -------
+    List[go.Scatter]
+        A list of Plotly Scatter objects representing the arrows.
     '''
     arrows = []
     for workflow, dependent_workflows in dependencies.items():
@@ -159,12 +171,9 @@ def add_arrows(metrics_df, dependencies):
         
             for _, workflow_row in workflow_rows.iterrows():
                 for _, dep_row in dep_rows.iterrows():
-                    workflow_end_time = workflow_row['end_time']
-                    dep_start_time = dep_row['start_time']
-                
                     arrows.append(go.Scatter(
-                        x=[workflow_end_time, dep_start_time], 
-                        y=[workflow_row['workflow_name_id'], dep_row['workflow_name_id']], 
+                        x=[workflow_row['end_time'], dep_row['start_time']],
+                        y=[workflow_row['workflow_name_id'], dep_row['workflow_name_id']],
                         mode='lines',
                         line=dict(color='black', width=1, dash='dot'),
                         showlegend=False
@@ -173,15 +182,18 @@ def add_arrows(metrics_df, dependencies):
     return arrows
 
 
-def update_axes(fig, metrics_df, run_order=None):
+def update_axes(fig: go.Figure, metrics_df: pd.DataFrame, run_order: Optional[List[str]] = None) -> None:
     '''
-    Updates the axes of a given figure to display y axis values either based on run order or workflow start time. 
-    
+    Updates the axes of a given figure to display y axis values either based on run order or workflow start time.
+
     Parameters
-    -----------
-    - The figure object to which the axes will be updated. 
-    - A pandas dataframe containing sorted workflow metrics ordered either by their start time or by their run order. 
-    - A list of workflow run orders.
+    ----------
+    fig : go.Figure
+        The figure object to which the axes will be updated.
+    metrics_df : pd.DataFrame
+        A pandas dataframe containing sorted workflow metrics.
+    run_order : Optional[List[str]]
+        A list of workflow run orders.
     '''
     if run_order:
         tickvals = metrics_df['workflow_name_id'].unique()
@@ -212,17 +224,20 @@ def update_axes(fig, metrics_df, run_order=None):
     )
 
 
-def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png', png_file_2='wrt_gantt_v2.png'):
+def gantt_plot(workflow_metrics: pd.DataFrame, config_file: Optional[str] = None, png_file_1: str = 'wrt_gantt_v1.png', png_file_2: str = 'wrt_gantt_v2.png') -> None:
     '''
-    Generates two Gantt charts of workflow runtime. 
-
-    Note: The function saves the Gantt charts as PNG files. The first chart (`png_file_1`) shows workflows sorted by their start times, 
-    while the second chart (`png_file_2`) shows them sorted by their run order. 
+    Generates two Gantt charts of workflow runtime and saves them as PNG files.
 
     Parameters
-    -----------
-    - A pandas dataframe containing the workflow metrics. 
-    - Two PNG files where the Gantt Charts will be saved. 
+    ----------
+    workflow_metrics : pd.DataFrame
+        A pandas dataframe containing the workflow metrics.
+    config_file : Optional[str]
+        Path to the workflow configuration file containing run order and dependencies. [Optional]
+    png_file_1 : str
+        Path to the first PNG file where the Gantt Chart will be saved.
+    png_file_2 : str
+        Path to the second PNG file where the Gantt Chart will be saved.
     '''
     generate_second_chart = False
 
@@ -314,69 +329,76 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
         print(f"Workflow run metrics by run order saved to {png_file_2}")
 
 
-def generate_csv(workflow_metrics,  csv_file='workflow_report.csv'):
+def generate_csv(workflow_metrics: pd.DataFrame, csv_file: str = 'workflow_report.csv') -> None:
     '''
-    Saves workflow metrics data generated from the parse_json function to a CSV file. 
-    
-    Note: If the file already exists, the function appends the data without writing the header again. 
-    If the file does not exist, the data is written with the header.
+    Saves workflow metrics data to a CSV file.
 
     Parameters
-    -----------
-    - The pandas dataframe containing workflow metrics. 
-    - An optional CSV filename/path where the metrics are to be stored. 
+    ----------
+    workflow_metrics : pd.DataFrame
+        The pandas dataframe containing workflow metrics.
+    csv_file : str
+        The CSV filename/path where the metrics are to be stored. 
     '''
     # Check if CSV file already exists
-    file_exists = os.path.isfile(csv_file)
-        
-    if file_exists:
+    if os.path.isfile(csv_file):
         workflow_metrics.to_csv(csv_file, mode='a', header=False, index=False)
     else:
-        # If the file does not exist, write the DataFrame with the header
         workflow_metrics.to_csv(csv_file, mode='w', header=True, index=False)
-    
+
     print(f"Workflow run metrics saved to {csv_file}")
 
         
 
-def process_json_file(json_file, config_file):
+def process_input_data(input_file: str, config_file: Optional[str] = None) -> None:
     '''
-    Processes an input JSON file and calls the extract workflow ids, and 
-    query mongodb functions. 
+    Processes an input JSON or Text file to retrieve workflow run ids.
 
     Parameters
     ----------
-    - Path to an input JSON file that needs to be processed to extract workflow ids.  
+    input_file : str
+        Path to an input JSON or Text file that needs to be processed to extract workflow ids.
+    config_file : Optional[str]
+        Path to the workflow configuration file containing run order and dependencies. [Optional]
     '''
     # Check if file exists
-    if not os.path.isfile(json_file):
-        print(f"File {json_file} not found.")
+    if not os.path.isfile(input_file):
+        print(f"File {input_file} not found.")
         return
 
-    # Load JSON data
-    try:
-        with open(json_file, 'r') as file:
-            input_data = json.load(file)
-    except Exception as e:
-        print(f"Error loading JSON file: {e}")
+    # Check if the input is a JSON or TXT file 
+    if input_file.endswith('.json'):
+        try:
+            with open(input_file, 'r') as file:
+                input_data = json.load(file)
+            workflow_ids = extract_workflow_ids(input_data)
+        except Exception as e:
+            print(f"Error loading JSON file: {e}")
+            return
+        
+    
+    elif input_file.endswith('.txt'):
+        with open(input_file, 'r') as file:
+            workflow_ids = [line.strip() for line in file.readlines()]
+    
+    else:
+        print(f"Error: The input must be either '.json' or '.txt' file")
         return
-
-    # Extract workflow IDs
-    workflow_ids = extract_workflow_ids(input_data)
 
     # Check if there are any workflow IDs extracted
     if not workflow_ids:
         print("No workflow IDs found.")
         return
-    else:
+    
+    workflow_metrics = None
+    print(f"Extracting workflow metrics for workflow_ids")
+    metrics_dict = query_mongodb(workflow_ids)
+        
+    if metrics_dict:
         workflow_metrics = None
-        for workflow_id in workflow_ids:
-            print(f"Extracting workflow metrics for workflow_id: {workflow_id}")
-            data = query_mongodb(workflow_id)
-            if data:
-                workflow_metrics = parse_json(data, workflow_metrics)
+        for workflow_id, metrics in metrics_dict.items():
+            workflow_metrics = parse_json(metrics, workflow_metrics)
 
-        # Generate gantt chart and CSV report if metrics are available
         if workflow_metrics is not None:
             gantt_plot(workflow_metrics, config_file)
             generate_csv(workflow_metrics)
@@ -384,14 +406,14 @@ def process_json_file(json_file, config_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description = 'Generate gantt charts for workflow metrics'
+        description = 'Generate gantt charts from workflow run metrics'
     )
 
     # Add the argument for the input JSON file and the workflow configuration file
     parser.add_argument(
         '-i', '--input',
         type = str,
-        help = 'Path to the input JSON file containing workflow IDs',
+        help = 'Path to the input JSON or TXT file containing workflow IDs',
         required = True
     )
 
@@ -404,15 +426,17 @@ if __name__ == "__main__":
 
     # Add custom message to show usage
     parser.epilog = '''
-    Example Usage: python3 workflow_rt.py -i /path/to/input/JSON 
+    Example Usage: pipeline-rt -i /path/to/input/JSON 
+    OR
+    pipeline-rt -i /path/to/input/TXT
     '''
 
     # Parse arguments
     args = parser.parse_args()
-    json_file = args.input
+    input_file = args.input
 
     if len(vars(args)) == 0:
         parser.print_help()
         exit(0)
     else:
-        process_json_file(json_file, config_file = args.config)
+        process_input_data(input_file, config_file = args.config)
