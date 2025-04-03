@@ -37,10 +37,10 @@ def extract_workflow_ids(data):
         for item in data:
             workflow_ids.extend(extract_workflow_ids(item))
 
-    return workflow_ids
+    return workflow_ids.drop_duplicates()
 
 
-def query_mongodb(workflow_ids):
+def query_mongodb(workflow_id):
     '''
     Queries workflow ids against a MongoDB Database and returns the results as a dictionary.
 
@@ -54,7 +54,7 @@ def query_mongodb(workflow_ids):
     Optional[Dict[str, dict]]
         A dictionary containing the results, or None if an error occurred. 
     '''
-    query_str = '{"workflow_run_id": {"$in": ' + json.dumps(workflow_ids) + '}}'
+    query_str = '{"workflow_run_id": "' + str(workflow_id) + '"}'
     command = [
         "mongoexport",
         "--host", "workflow-metrics-db.gsi.oicr.on.ca",
@@ -70,15 +70,15 @@ def query_mongodb(workflow_ids):
     try:
         # Run mongoexport and capture the result
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
-        workflow_entry = json.loads(result.stdout)
-        return {entry['workflow_run_id']: entry for entry in workflow_entry}
-    except subprocess.CalledProcessError as e:
-        print(f"Error querying workflows: {e}")
-    except Exception as e:
-        print(f"Unexpected error while querying workflows: {e}")
-    
-    return None
+        data = json.loads(result.stdout)
+        return data
 
+    except subprocess.CalledProcessError as e:
+        print(f"Error querying {workflow_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error while querying {workflow_id}: {e}")
+        return None
 
 def parse_json(data, workflow_metrics=None):
     '''
@@ -249,6 +249,12 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
+    num_workflows = len(metrics_sorted['workflow_name_id'].unique())
+    if num_workflows == 1:
+        ht = 200  # Minimal height for one workflow
+    else:
+        ht = max(400, num_workflows * 30)
+
     fig_1 = px.timeline(metrics_sorted, 
                         x_start='start_time', 
                         x_end='end_time', 
@@ -273,18 +279,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
         title_x=0.5,
         plot_bgcolor='white',
         showlegend=False,
-        annotations=[
-                {
-                    'text': "Sorted by run start time", 
-                    'x': 0.45, 
-                    'y': 1.06, 
-                    'xref': 'paper',
-                    'yref': 'paper',
-                    'showarrow': False,
-                    'font': {'size': 14, 'color': 'grey'},  
-                    'align': 'center' 
-                }
-            ]
+        height = ht
         )   
     fig_1.write_image(png_file_1)
     print(f"Workflow run metrics by start time saved to {png_file_1}")
@@ -312,18 +307,7 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
             title_x=0.5,
             plot_bgcolor='white',
             showlegend=False,
-            annotations=[
-                {
-                    'text': "Sorted by run order", 
-                    'x': 0.45, 
-                    'y': 1.06, 
-                    'xref': 'paper',
-                    'yref': 'paper',
-                    'showarrow': False,
-                    'font': {'size': 14, 'color': 'grey'},  
-                    'align': 'center' 
-                }
-            ]
+            height = ht
         )
         fig_2.write_image(png_file_2)
         print(f"Workflow run metrics by run order saved to {png_file_2}")
@@ -340,12 +324,7 @@ def generate_csv(workflow_metrics, csv_file='workflow_report.csv'):
     csv_file : str
         The CSV filename/path where the metrics are to be stored. 
     '''
-    # Check if CSV file already exists
-    if os.path.isfile(csv_file):
-        workflow_metrics.to_csv(csv_file, mode='a', header=False, index=False)
-    else:
-        workflow_metrics.to_csv(csv_file, mode='w', header=True, index=False)
-
+    workflow_metrics.to_csv(csv_file, mode='w', header=True, index=False)
     print(f"Workflow run metrics saved to {csv_file}")
 
         
@@ -379,7 +358,11 @@ def process_input_data(input_file, config_file=None):
     
     elif input_file.endswith('.txt'):
         with open(input_file, 'r') as file:
-            workflow_ids = [line.strip() for line in file.readlines()]
+            workflow_ids = [
+            line.strip() for line in file.readlines()
+            if re.match(r'^[A-Za-z0-9\-]+$', line.strip()) 
+        ]
+        workflow_ids = list(set(workflow_ids))
     
     else:
         print(f"Error: The input must be either '.json' or '.txt' file")
@@ -392,16 +375,14 @@ def process_input_data(input_file, config_file=None):
     
     workflow_metrics = None
     print(f"Extracting workflow metrics for workflow_ids")
-    metrics_dict = query_mongodb(workflow_ids)
-        
-    if metrics_dict:
-        workflow_metrics = None
-        for workflow_id, metrics in metrics_dict.items():
-            workflow_metrics = parse_json(metrics, workflow_metrics)
+    for workflow_id in workflow_ids:
+            data = query_mongodb(workflow_id)
+            if data:
+                workflow_metrics = parse_json(data, workflow_metrics)
 
-        if workflow_metrics is not None:
-            gantt_plot(workflow_metrics, config_file)
-            generate_csv(workflow_metrics)
+    if workflow_metrics is not None:
+        gantt_plot(workflow_metrics, config_file)
+        generate_csv(workflow_metrics)
         
 
 if __name__ == "__main__":
