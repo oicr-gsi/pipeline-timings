@@ -37,7 +37,46 @@ def extract_workflow_ids(data):
         for item in data:
             workflow_ids.extend(extract_workflow_ids(item))
 
-    return workflow_ids.drop_duplicates()
+    return list(set(workflow_ids))
+
+
+
+def query_fpr(fp_path, workflow_ids):
+    '''
+    Queries workflow ids against File Provenance to extract sample names.
+
+    Parameters
+    ----------
+    workflow_ids : List[str]
+        A list of workflow ids to search against the FP report.
+
+    Returns
+    -------
+    Optional List[str]
+        A list of sample names, or None if an error occurred. 
+    '''
+    sname = []
+    chunk_size = 10000
+    for workflow_id in workflow_ids:
+        try:
+            for chunk in pd.read_csv(fp_path, sep='\t', compression='gzip', chunksize = chunk_size):
+                filt_chunk = chunk[chunk['Workflow Run SWID'] == workflow_id]
+                col = filt_chunk[['Root Sample Name', 'Workflow Run SWID']]
+                sname.append(col)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error querying {workflow_id}: {e}")
+            return None
+
+        except Exception as e:
+            print(f"Unexpected error while querying {workflow_id}: {e}")
+            return None
+
+    df = pd.concat(sname, ignore_index=True)
+    col = ['sample_name', 'workflow_run_id']
+    df.columns = col
+    return df.drop_duplicates()
+
 
 
 def query_mongodb(workflow_id):
@@ -79,6 +118,8 @@ def query_mongodb(workflow_id):
     except Exception as e:
         print(f"Unexpected error while querying {workflow_id}: {e}")
         return None
+
+
 
 def parse_json(data, workflow_metrics=None):
     '''
@@ -127,6 +168,7 @@ def parse_json(data, workflow_metrics=None):
     return workflow_metrics
 
 
+
 def load_config(config_file):
     '''
     Loads the workflow run order and dependencies from a JSON file.
@@ -145,6 +187,7 @@ def load_config(config_file):
         config = json.load(file)
 
     return config['workflow_run_order'], config['dependencies']
+
 
 
 def add_arrows(metrics_df, dependencies):
@@ -180,6 +223,7 @@ def add_arrows(metrics_df, dependencies):
                     ))
 
     return arrows
+
 
 
 def update_axes(fig, metrics_df, run_order=None):
@@ -224,6 +268,50 @@ def update_axes(fig, metrics_df, run_order=None):
     )
 
 
+
+def create_plot(df, fig_ht, fig_title, out_png, arrows=None, workflow_run_order=None):
+    '''
+    Creates a Gantt chart from the given metrics and saves it as a PNG file.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The sorted dataframe containing the workflow metrics.
+    fig_ht : int
+        The height of the plot.
+    fig_title : str
+        The title of the Gantt chart.
+    out_png_file : str
+        The path where the PNG file should be saved.
+    
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure
+        The figure object for the Gantt chart.
+    ''' 
+    fig = px.timeline(df, 
+                      x_start='start_time', 
+                      x_end='end_time', 
+                      y='workflow_name_id', 
+                      color='workflow_run_id')
+    
+    if arrows:
+        fig.add_arrows(arrows)
+    
+    update_axes(fig, df, workflow_run_order)
+
+    fig.update_layout(
+        title=fig_title,
+        title_x=0.5,
+        plot_bgcolor='white',
+        showlegend=False,
+        height=fig_ht
+    )
+    
+    return fig
+
+
+
 def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png', png_file_2='wrt_gantt_v2.png'):
     '''
     Generates two Gantt charts of workflow runtime and saves them as PNG files.
@@ -250,67 +338,65 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
     num_workflows = len(metrics_sorted['workflow_name_id'].unique())
-    if num_workflows == 1:
-        ht = 200  # Minimal height for one workflow
-    else:
-        ht = max(400, num_workflows * 30)
+    ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
 
-    fig_1 = px.timeline(metrics_sorted, 
-                        x_start='start_time', 
-                        x_end='end_time', 
-                        y='workflow_name_id', 
-                        color='workflow_run_id',
-    )
+    unique_samples = workflow_metrics['sample_name'].nunique()
     
+    arrows_1 = None
+    arrows_2 = None
+    workflow_run_order = None
+
     if config_file:
-        #Generate the second plot and add dependency links only if workflow dependencies and run order are provided
-        workflow_run_order, dependencies = load_config(config_file)
-        generate_second_chart = True
+            #Generate the second plot and add dependency links only if workflow dependencies and run order are provided
+            workflow_run_order, dependencies = load_config(config_file)
+            generate_second_chart = True
+            order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
+            metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
+            metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
+            
+            #Add dependency links to first plot
+            arrows_1 = add_arrows(metrics_sorted, dependencies) 
+            arrows_2 = add_arrows(metrics_sorted_run_order, dependencies)
 
-        #Add dependency links to first plot
-        arrows = add_arrows(metrics_sorted, dependencies)
-        fig_1.add_traces(arrows)
+    if unique_samples == 1:
+        sample_name = workflow_metrics['sample_name'].iloc[0]
+        title_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
+        fig_1 = create_plot(metrics_sorted, ht, title_1, png_file_1, arrows_1)
+        fig_1.write_image(png_file_1)
+        print(f"Workflow run metrics saved to {png_file_1}")
 
-        
-    update_axes(fig_1, metrics_sorted)
-
-    fig_1.update_layout(
-        title='Gantt Chart of Workflow Runtime',
-        title_x=0.5,
-        plot_bgcolor='white',
-        showlegend=False,
-        height = ht
-        )   
-    fig_1.write_image(png_file_1)
-    print(f"Workflow run metrics by start time saved to {png_file_1}")
-
-    # Modify the 'y axis' values based on the run order and sort metrics based on this order
-    if generate_second_chart:
-        order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
-        metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
-        metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
-
-        fig_2 = px.timeline(metrics_sorted_run_order, 
-                        x_start='start_time', 
-                        x_end='end_time', 
-                        y='workflow_name_id', 
-                        color='workflow_run_id',
-        )
+        if generate_second_chart:
+            title_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
+            fig_2 = create_plot(metrics_sorted_run_order, ht, title_2, png_file_2, arrows_2, workflow_run_order)
+            fig_2.write_image(png_file_2)
+            print(f"Workflow run metrics by run order saved to {png_file_2}")
     
-        arrows = add_arrows(metrics_sorted_run_order, dependencies)
-        fig_2.add_traces(arrows)
+    else:
+        for sample in workflow_metrics['sample_name'].unique():
+            sample_metrics = metrics_sorted[metrics_sorted['sample_name'] == sample]
+            num_workflows = len(sample_metrics['workflow_name_id'].unique())
+            ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
 
-        update_axes(fig_2, metrics_sorted_run_order, workflow_run_order)
+            # Chart 1
+            title_sample_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
+            sample_png = f"{png_file_1.replace('.png', f'_{sample}.png')}"
+            fig_1_sample = create_plot(sample_metrics, ht, title_sample_1, sample_png, arrows_1)
+            fig_1_sample.write_image(sample_png)
+            print(f"Workflow run metrics for sample {sample} saved to {sample_png}")
 
-        fig_2.update_layout(
-            title='Gantt Chart of Workflow Runtime',
-            title_x=0.5,
-            plot_bgcolor='white',
-            showlegend=False,
-            height = ht
-        )
-        fig_2.write_image(png_file_2)
-        print(f"Workflow run metrics by run order saved to {png_file_2}")
+            
+            if generate_second_chart:
+                sample_metrics = metrics_sorted_run_order[metrics_sorted_run_order['sample_name'] == sample]
+                num_workflows = len(sample_metrics['workflow_name_id'].unique())
+                ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
+
+                # Chart 2
+                title_sample_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
+                sample_png = f"{png_file_2.replace('.png', f'_{sample}.png')}"
+                fig_2_sample = create_plot(sample_metrics,ht, title_sample_2, sample_png, arrows_2, workflow_run_order)
+                fig_2_sample.write_image(sample_png)
+                print(f"Workflow run metrics by run order for sample {sample} saved to {sample_png}")
+
 
 
 def generate_csv(workflow_metrics, csv_file='workflow_report.csv'):
@@ -373,14 +459,19 @@ def process_input_data(input_file, config_file=None):
         print("No workflow IDs found.")
         return
     
+    fp_path = "/scratch2/groups/gsi/production/vidarr/vidarr_files_report_latest.tsv.gz"
+    print("Extracting sample names for workflow_ids")
+    df_sname = query_fpr(fp_path, workflow_ids)
+    
     workflow_metrics = None
-    print(f"Extracting workflow metrics for workflow_ids")
+    print("Extracting workflow metrics for workflow_ids")
     for workflow_id in workflow_ids:
             data = query_mongodb(workflow_id)
             if data:
                 workflow_metrics = parse_json(data, workflow_metrics)
 
-    if workflow_metrics is not None:
+    if workflow_metrics is not None and df_sname is not None:
+        workflow_metrics = pd.merge(workflow_metrics, df_sname, left_on='workflow_run_id', right_on='workflow_run_id', how='left')
         gantt_plot(workflow_metrics, config_file)
         generate_csv(workflow_metrics)
         
