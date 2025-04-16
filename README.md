@@ -1,7 +1,7 @@
 # Pipeline Timings #
 
 Scripts in this repo are used to generate workflow run time diagrams. 
-`workflow_rt.py` is used to plot run times by extracting workflow IDs from input JSON files.  
+`workflow_rt.py` is used to plot run times by extracting workflow IDs from input JSON/TXT files.  
 
 ## Getting Started ##
 
@@ -19,27 +19,27 @@ Two examples of using the script are as follows:
 
 <b>Example 1</b>
 ```
-pipeline-rt -i input.json
+pipeline-rt -i [input.json] or [input.txt]
 ```
-This will pull workflow IDs from `input.json` and, workflow metrics from `/.mounts/labs/gsi/secrets/`, to create a metrics table and plot written out to `workflow_report.csv` and `wrt_gantt_v1.png` respectively. 
+This will pull workflow IDs from `input.json` or `input.txt` and, workflow metrics from `/.mounts/labs/gsi/secrets/`, to create a metrics table and plot written out to `workflow_report.csv` and `wrt_gantt_v1.png` respectively. 
 
 
 <b>Example 2</b>
 
 ```
-pipeline-rt -i input.json --config workflow_config.json
+pipeline-rt -i [input.json] or [input.txt] --config [workflow_config.json]
 ```
-This will pull workflow IDs from `input.json` and, workflow metrics from `/.mounts/labs/gsi/secrets/`, to create a metrics table and two plots written out to `workflow_report.csv`, `wrt_gantt_v1.png` and `wrt_gantt_v2.png` respectively. Plot `wrt_gantt_v1.png` follows the default y axis ordering, by workflow start time, and plot `wrt_gantt_v2.png` follows the user provided y axis ordering by workflow run order. 
+This will pull workflow IDs from `input.json` or `input.txt` and, workflow metrics from `/.mounts/labs/gsi/secrets/`, to create a metrics table and two plots written out to `workflow_report.csv`, `wrt_gantt_v1.png` and `wrt_gantt_v2.png` respectively. Plot `wrt_gantt_v1.png` follows the default y axis ordering, by workflow start time, and plot `wrt_gantt_v2.png` follows the user provided y axis ordering by workflow run order. 
 
 Parameters
 
 | argument | purpose | required/optional                                    |
 | ------- | ------- | ------------------------------------------ |
-| -i | Path to input JSON file  | required              |
+| -i | Path to input JSON/TXT file  | required              |
 | --config | Path to workflow run order and workflow dependency | optional              |
 
 - Input File `-i / --input`:
-Required parameter. The path to the input JSON file.
+Required parameter. The path to the input JSON/TXT file.
 Check to see the structure of the input file below.
 
 - Config File `--config`:
@@ -61,6 +61,16 @@ The basic structure for the input file is organized with sample ids, and workflo
       }
    }
 }   
+```
+
+#### Basic input text structure ####
+
+The basic structure for the input file is organized with workflow ids.
+
+```
+id_1
+id_2
+id_3
 ```
 
 #### Basic config json structure ####
