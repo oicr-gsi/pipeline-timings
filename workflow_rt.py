@@ -280,7 +280,7 @@ def create_plot(df, fig_ht, fig_title, out_png, arrows=None, workflow_run_order=
 
 
 
-def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png', png_file_2='wrt_gantt_v2.png'):
+def gantt_plot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', png_file_2='gantt_v2.png'):
     '''
     Generates two Gantt charts of workflow runtime and saves them as PNG files.
     Parameters
@@ -325,13 +325,15 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='wrt_gantt_v1.png'
         sample_name = workflow_metrics['sample_name'].iloc[0]
         title_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
         fig_1 = create_plot(metrics_sorted, ht, title_1, png_file_1, arrows_1)
-        fig_1.write_image(png_file_1)
+        png = f"{png_file_1.replace('.png', f'_{sample_name}.png')}"
+        fig_1.write_image(png)
         print(f"Workflow run metrics saved to {png_file_1}")
 
         if generate_second_chart:
             title_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
             fig_2 = create_plot(metrics_sorted_run_order, ht, title_2, png_file_2, arrows_2, workflow_run_order)
-            fig_2.write_image(png_file_2)
+            png = f"{png_file_2.replace('.png', f'_{sample_name}.png')}"
+            fig_2.write_image(png)
             print(f"Workflow run metrics by run order saved to {png_file_2}")
     
     else:
