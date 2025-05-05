@@ -2,6 +2,8 @@ import os
 import subprocess
 import json
 import re
+import csv
+import gzip
 import sys
 import argparse
 import pandas as pd
@@ -21,7 +23,6 @@ def extract_workflow_ids(data):
     List[str]: A list of workflow ids.
     '''
     workflow_ids = []
-
     # Check if data is a dictionary or a list
     if isinstance(data, dict):
         for key, value in data.items():
@@ -29,6 +30,7 @@ def extract_workflow_ids(data):
                 workflow_ids.append(value)
             else:
                 workflow_ids.extend(extract_workflow_ids(value))
+
     elif isinstance(data, list):
         for item in data:
             workflow_ids.extend(extract_workflow_ids(item))
@@ -45,27 +47,26 @@ def query_fpr(fp_path, workflow_ids):
     workflow_ids List[str]: A list of workflow ids to search against the FP report.
     Returns
     -------
-    Optional List[str]: A list of sample names, or None if an error occurred. 
+    pd.DataFrame: A pandas dataframe containing extracted sample names and their corresponding workflow ids.
     '''
+    print("Extracting records from FPR: " + fp_path)
     sname = []
-    chunk_size = 10000
-    
     try:
-        for chunk in pd.read_csv(fp_path, sep='\t', compression='gzip', chunksize = chunk_size):
-            filt_chunk = chunk[chunk['Workflow Run SWID'].isin(workflow_ids)]
-            if not filt_chunk.empty:
-                sname.append(filt_chunk[['Root Sample Name', 'Workflow Run SWID']])
-
+        with gzip.open(fp_path, 'rt') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            for row in reader:
+                if row['Workflow Run SWID'] in workflow_ids:
+                    sname.append({'sample_name': row['Root Sample Name'], 'workflow_run_id': row['Workflow Run SWID']})
+        
+        if not sname:
+            return pd.DataFrame(columns=['sample_name', 'workflow_run_id'])
+        
+        df = pd.DataFrame(sname).drop_duplicates()
+        return df
+    
     except Exception as e:
         print(f"Unexpected error while querying FPR: {e}")
         return None
-    
-    if not sname:
-        return pd.DataFrame(columns=['sample_name', 'workflow_run_id'])
-
-    df = pd.concat(sname, ignore_index=True).drop_duplicates()
-    df.columns = ['sample_name', 'workflow_run_id']
-    return df
 
 
 def query_mongodb(workflow_ids):
@@ -79,8 +80,6 @@ def query_mongodb(workflow_ids):
     Optional List[Dict]: A list of dictionaries containing the query results, or None if an error occurred. 
     '''
     out = []
-
-    
     query_str = '{"workflow_run_id": {"$in": ' + json.dumps(workflow_ids) + '}}'
     command = [
         "mongoexport",
@@ -93,14 +92,13 @@ def query_mongodb(workflow_ids):
         "--jsonArray",
         "--query", query_str
     ]
-    
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
         out = json.loads(result.stdout)
-            
 
     except subprocess.CalledProcessError as e:
         print(f"Error querying {workflow_id}: {e}")
+
     except Exception as e:
         print(f"Unexpected error while querying {workflow_id}: {e}")
 
@@ -132,7 +130,6 @@ def parse_json(data, workflow_metrics=None):
                 'workflows': [],
                 'max_provisionFileOut': 0
             }
-
         if workflow.get('workflow_name') == 'provisionFileOut':
             grouped_by_run_id[workflow_run_id]['max_provisionFileOut'] = max(
                 grouped_by_run_id[workflow_run_id]['max_provisionFileOut'],
@@ -190,7 +187,6 @@ def add_arrows(metrics_df, dependencies):
         for dep in dependent_workflows:
             workflow_rows = metrics_df[metrics_df['workflow_name'] == workflow]
             dep_rows = metrics_df[metrics_df['workflow_name'] == dep]
-        
             for _, workflow_row in workflow_rows.iterrows():
                 for _, dep_row in dep_rows.iterrows():
                     arrows.append(go.Scatter(
@@ -217,10 +213,11 @@ def update_axes(fig, metrics_df, run_order=None):
     if run_order:
         tickvals = metrics_df['workflow_name_id'].unique()
         ticktext = [workflow for workflow in run_order for _ in range(len(metrics_df[metrics_df['workflow_name'] == workflow]))]
+    
     else:
         tickvals = [workflow for workflow in metrics_df['workflow_name_id'].unique()]
         ticktext = [workflow.split('-')[0] for workflow in metrics_df['workflow_name_id']]
-
+    
     fig.update_yaxes(
         mirror=True,
         ticks='outside',
@@ -233,6 +230,7 @@ def update_axes(fig, metrics_df, run_order=None):
         tickvals=tickvals,
         ticktext=ticktext
     )
+    
     fig.update_xaxes(
         mirror=True,
         ticks='outside',
@@ -261,11 +259,13 @@ def create_plot(df, fig_ht, fig_title, out_png, arrows=None, workflow_run_order=
                       x_start='start_time', 
                       x_end='end_time', 
                       y='workflow_name_id', 
-                      color='workflow_run_id')
+                      color='workflow_run_id',
+                      color_discrete_sequence=px.colors.qualitative.Dark24 
+                    )
     
     if arrows:
         fig.add_arrows(arrows)
-    
+
     update_axes(fig, df, workflow_run_order)
 
     fig.update_layout(
@@ -275,7 +275,7 @@ def create_plot(df, fig_ht, fig_title, out_png, arrows=None, workflow_run_order=
         showlegend=False,
         height=fig_ht
     )
-    
+
     return fig
 
 
@@ -295,16 +295,14 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', pn
     # Convert start_time and end_time to datetime format  
     workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'], errors = 'coerce')
     workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'], errors = 'coerce')
-    
+
     # Sort based on start times and create a new column that concatenates workflow names and their run IDs.
     metrics_sorted = workflow_metrics.sort_values(by='start_time')
     metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
 
     num_workflows = len(metrics_sorted['workflow_name_id'].unique())
     ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-
     unique_samples = workflow_metrics['sample_name'].nunique()
-    
     arrows_1 = None
     arrows_2 = None
     workflow_run_order = None
@@ -316,7 +314,6 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', pn
             order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
             metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
             metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
-            
             #Add dependency links to first plot
             arrows_1 = add_arrows(metrics_sorted, dependencies) 
             arrows_2 = add_arrows(metrics_sorted_run_order, dependencies)
@@ -328,20 +325,18 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', pn
         png = f"{png_file_1.replace('.png', f'_{sample_name}.png')}"
         fig_1.write_image(png)
         print(f"Workflow run metrics saved to {png_file_1}")
-
         if generate_second_chart:
             title_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
             fig_2 = create_plot(metrics_sorted_run_order, ht, title_2, png_file_2, arrows_2, workflow_run_order)
             png = f"{png_file_2.replace('.png', f'_{sample_name}.png')}"
             fig_2.write_image(png)
             print(f"Workflow run metrics by run order saved to {png_file_2}")
-    
+
     else:
         for sample in workflow_metrics['sample_name'].unique():
             sample_metrics = metrics_sorted[metrics_sorted['sample_name'] == sample]
             num_workflows = len(sample_metrics['workflow_name_id'].unique())
             ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-
             # Chart 1
             title_sample_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
             sample_png = f"{png_file_1.replace('.png', f'_{sample}.png')}"
@@ -349,12 +344,10 @@ def gantt_plot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', pn
             fig_1_sample.write_image(sample_png)
             print(f"Workflow run metrics for sample {sample} saved to {sample_png}")
 
-            
             if generate_second_chart:
                 sample_metrics = metrics_sorted_run_order[metrics_sorted_run_order['sample_name'] == sample]
                 num_workflows = len(sample_metrics['workflow_name_id'].unique())
                 ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-
                 # Chart 2
                 title_sample_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
                 sample_png = f"{png_file_2.replace('.png', f'_{sample}.png')}"
@@ -400,26 +393,22 @@ def process_input_data(input_file, config_file=None):
         except Exception as e:
             print(f"Error loading JSON file: {e}")
             return
-        
-    
+
     elif input_file.endswith('.txt'):
         print("Processing TXT for workflow ids")
         with open(input_file, 'r') as file:
             lines = file.readlines()
-
         header_found = False
         if lines and re.match(r'^[A-Za-z0-9\-]+$', lines[0].strip()) is None: 
             header_found = True
             lines = lines[1:]
-            
         workflow_ids = []
         for line in lines:
             stripped_line = line.strip()
             if re.match(r'^[A-Za-z0-9\-]+$', stripped_line): 
                 workflow_ids.append(stripped_line)
-
         workflow_ids = list(set(workflow_ids))
-    
+
     else:
         print(f"Error: The input must be either '.json' or '.txt' file")
         return
@@ -429,7 +418,6 @@ def process_input_data(input_file, config_file=None):
         return
     
     fp_path = "/scratch2/groups/gsi/production/vidarr/vidarr_files_report_latest.tsv.gz"
-    print("Extracting sample names for workflow_ids")
     df_sname = query_fpr(fp_path, workflow_ids)
     
     print("Extracting workflow metrics for workflow_ids")
