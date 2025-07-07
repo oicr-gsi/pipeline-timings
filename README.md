@@ -129,5 +129,5 @@ To create a config file (`workflow_config.json`) with workflow run order, workfl
   }
 }  
 ```
-
+The second `.py` script is `plot.py` which is made available by the module in the `share/` directory. This python script helps generate gantt plots directly from the `workflow_rt.py` csv output allowing more flexibility to the user in customization of the plot. 
 
