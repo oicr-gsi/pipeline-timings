@@ -4,13 +4,18 @@ import json
 import re
 import csv
 import gzip
-import sys
 import argparse
 import pandas as pd
-import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
+from collections import defaultdict
+import logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    )
 
 def extractWfId(data):
     '''
@@ -37,8 +42,6 @@ def extractWfId(data):
 
     return list(set(workflow_ids))
 
-
-
 def queryFpr(fp_path, workflow_ids):
     '''
     Queries workflow ids against the File Provenance Report to extract sample names.
@@ -49,25 +52,43 @@ def queryFpr(fp_path, workflow_ids):
     -------
     pd.DataFrame: A pandas dataframe containing extracted sample names and their corresponding workflow ids.
     '''
-    print("Extracting records from FPR: " + fp_path)
+    logging.info(f"Extracting records from FPR: {fp_path}")
     sname = []
+    seen = set()
     try:
         with gzip.open(fp_path, 'rt') as f:
             reader = csv.DictReader(f, delimiter='\t')
             for row in reader:
-                if row['Workflow Run SWID'] in workflow_ids:
-                    sname.append({'sample_name': row['Root Sample Name'], 'workflow_run_id': row['Workflow Run SWID']})
+                workflow_run_id = row['Workflow Run SWID']
+                if workflow_run_id in workflow_ids and workflow_run_id not in seen:
+                    seen.add(workflow_run_id)
+
+                    sample_name = row['Root Sample Name']
+                    sample_attrs = row.get('Sample Attributes', '')
+
+                    tissue = 'T'  # Default tissue
+                    for attr in sample_attrs.split(';'):
+                        if attr.strip().startswith('geo_tissue_type='):
+                            value = attr.split('=')[1].strip()
+                            if value == 'R':
+                                tissue = 'N'
+                            break  # Stop checking after first match
+
+                    sname.append({
+                        'sample_name': sample_name,
+                        'workflow_run_id': workflow_run_id,
+                        'tissue_type': tissue
+                    })        
         
         if not sname:
-            return pd.DataFrame(columns=['sample_name', 'workflow_run_id'])
+            return pd.DataFrame(columns=['sample_name', 'workflow_run_id', 'tissue_type'])
         
-        df = pd.DataFrame(sname).drop_duplicates()
+        df = pd.DataFrame(sname)
         return df
     
     except Exception as e:
-        print(f"Unexpected error while querying FPR: {e}")
+        logging.error(f"Unexpected error while querying FPR: {e}")
         return None
-
 
 def queryMongoDB(workflow_ids):
     '''
@@ -97,14 +118,12 @@ def queryMongoDB(workflow_ids):
         out = json.loads(result.stdout)
 
     except subprocess.CalledProcessError as e:
-        print(f"Error querying {workflow_id}: {e}")
+        logging.error(f"Error querying workflow IDs: {e}")
 
     except Exception as e:
-        print(f"Unexpected error while querying {workflow_id}: {e}")
+        logging.error(f"Unexpected error while querying workflow IDs: {e}")
 
     return out
-
-
 
 def parseJson(data, workflow_metrics=None):
     '''
@@ -138,6 +157,7 @@ def parseJson(data, workflow_metrics=None):
         else:
             grouped_by_run_id[workflow_run_id]['workflows'].append(workflow)
 
+    rows = []
     for run_id, group in grouped_by_run_id.items():
         for wf in group['workflows']:
             row = {
@@ -148,60 +168,30 @@ def parseJson(data, workflow_metrics=None):
                 'workflow_run_id': run_id,
                 'max_provisionFileOut_wallclock_seconds': group['max_provisionFileOut']
             }
-            workflow_metrics = pd.concat([workflow_metrics, pd.DataFrame([row])], ignore_index=True)
+            rows.append(row)
 
-    return workflow_metrics
-
-
+    return pd.DataFrame(rows)
 
 def loadConfig(config_file):
     '''
-    Loads the workflow run order and dependencies from a JSON file.
+    Loads the workflow run order and workflow list from a JSON file.
     Parameters
     ----------
     config_file str: A path to the JSON workflow configuration file.
     Returns
     -------
-    Tuple[List[str], Dict[str, List[str]]]: A list of workflows in the specified run order and a dictionary mapping workflow names to their dependencies.
+    Tuple[List[str], List[str]]: A list of workflows in the specified run order and a list of workflows to include in the Gantt chart.
     '''
     with open(config_file, 'r') as file:
         config = json.load(file)
 
-    return config['workflow_run_order'], config['dependencies']
+    run_order = config.get('workflow_run_order', [])
+    wf_list = config.get('workflow_to_include', None)
+    abbreviations = config.get('workflow_abbreviations', {})
 
+    return run_order, wf_list, abbreviations
 
-
-def addArrows(metrics_df, dependencies):
-    '''
-    Creates a list of lines (arrows) linking the different workflows and showing the dependency between them.
-    Parameters
-    ----------
-    metrics_df pd.DataFrame: A pandas dataframe containing sorted workflow metrics.
-    dependencies Dict[str, List[str]]: A dictionary where keys are workflow names and values are lists of workflows that depend on the key workflow.
-    Returns
-    -------
-    List[go.Scatter]: A list of Plotly Scatter objects representing the arrows.
-    '''
-    arrows = []
-    for workflow, dependent_workflows in dependencies.items():
-        for dep in dependent_workflows:
-            workflow_rows = metrics_df[metrics_df['workflow_name'] == workflow]
-            dep_rows = metrics_df[metrics_df['workflow_name'] == dep]
-            for _, workflow_row in workflow_rows.iterrows():
-                for _, dep_row in dep_rows.iterrows():
-                    arrows.append(go.Scatter(
-                        x=[workflow_row['end_time'], dep_row['start_time']],
-                        y=[workflow_row['workflow_name_id'], dep_row['workflow_name_id']],
-                        mode='lines',
-                        line=dict(color='black', width=1, dash='dot'),
-                        showlegend=False
-                    ))
-
-    return arrows
-
-
-
-def updateAxes(fig, metrics_df, run_order=None):
+def updateAxes(fig, metrics_df, run_order=None, grid_color='lightgrey', show_grid=True):
     '''
     Updates the axes of a given figure to display y axis values either based on run order or workflow start time.
     Parameters
@@ -212,7 +202,7 @@ def updateAxes(fig, metrics_df, run_order=None):
     '''
     if run_order:
         tickvals = metrics_df['workflow_name_id'].unique()
-        ticktext = [workflow for workflow in run_order for _ in range(len(metrics_df[metrics_df['workflow_name'] == workflow]))]
+        ticktext = metrics_df['workflow_name']
     
     else:
         tickvals = [workflow for workflow in metrics_df['workflow_name_id'].unique()]
@@ -223,7 +213,8 @@ def updateAxes(fig, metrics_df, run_order=None):
         ticks='outside',
         showline=True,
         linecolor='black',
-        gridcolor='lightgrey',
+        gridcolor=grid_color,
+        showgrid=show_grid,
         autorange='reversed', 
         title="Workflow Name",
         tickmode='array',
@@ -236,126 +227,221 @@ def updateAxes(fig, metrics_df, run_order=None):
         ticks='outside',
         showline=True,
         linecolor='black',
-        gridcolor='lightgrey',
+        gridcolor=grid_color,
+        showgrid=show_grid,
         title="Time"
     )
 
-
-
-def createPlot(df, fig_ht, fig_title, out_png, arrows=None, workflow_run_order=None):
+def compressGaps(df, threshold=24):
     '''
-    Creates a Gantt chart from the given metrics and saves it as a PNG file.
+    Compresses gaps in the workflow metrics dataframe based on a specified threshold.
+    Parameters
+    ----------
+    df pd.DataFrame: The dataframe containing workflow metrics with 'start_hr' and 'end_hr' columns.
+    threshold float: The threshold for compressing gaps, default is 24 hours.
+    Returns
+    -------
+    pd.DataFrame: A new dataframe with compressed timeline.
+    '''
+    df = df.copy().sort_values(by='start_hr')
+    shift = 0
+    last_time = df.iloc[0]['end_hr']
+    
+    compressed_s = []
+    compressed_e = []
+
+    for idx, row in df.iterrows():
+        gap = row['start_hr'] - last_time
+
+        if gap > threshold:
+            shift += gap - threshold
+
+        compressed_s.append(row['start_hr'] - shift)
+        compressed_e.append(row['end_hr'] - shift)
+        last_time = row['end_hr']
+    
+    df['start_hr'] = compressed_s
+    df['end_hr'] = compressed_e
+
+    return df
+
+def createPlot(df, fig_ht, fig_title, run_order=None, abbreviations=None, bar_color='#4682B4', plot_bgcolor='white', show_abbr=True, grid_color='lightgrey', show_grid=True, paper_bgcolor='white', title_col='black', axtitle_col='black', axtick_col='black', title_size=16, axtitle_size=14, axtick_size=12):
+    '''
+    Creates a Gantt chart from the given metrics and saves it as a html file.
     Parameters
     ----------
     df pd.DataFrame: The sorted dataframe containing the workflow metrics.
     fig_ht int: The height of the plot.
     fig_title str: The title of the Gantt chart.
-    out_png_file str: The path where the PNG file should be saved.
+    out_html_file str: The path where the html file should be saved.
     Returns
     -------
     fig plotly.graph_objects.Figure: The figure object for the Gantt chart.
     ''' 
-    fig = px.timeline(df, 
-                      x_start='start_time', 
-                      x_end='end_time', 
-                      y='workflow_name_id', 
-                      color='workflow_run_id',
-                      color_discrete_sequence=px.colors.qualitative.Dark24 
-                    )
-    
-    if arrows:
-        fig.addArrows(arrows)
+    fig = go.Figure()
 
-    updateAxes(fig, df, workflow_run_order)
+    row = 2 if (abbreviations and show_abbr) else 1
+
+    fig = make_subplots(
+        rows=row, cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.15 if (abbreviations and show_abbr) else 0,
+        row_heights=[0.70, 0.30] if (abbreviations and show_abbr) else [1.0],
+        specs=[[{"type": "xy"}]] + ([[{"type": "table"}]] if (abbreviations and show_abbr) else [])
+    )
+
+    for _, row in df.iterrows():
+        duration = row['end_hr'] - row['start_hr']
+        hover_text = (
+            f"Workflow Name: {row['workflow_name']}<br>"
+            f"Workflow_ID: {row['workflow_run_id']}<br>"
+            f"Start: {row['start_time'].strftime('%Y-%m-%d %H:%M')}<br>"
+            f"End: {row['end_time'].strftime('%Y-%m-%d %H:%M')}<br>"
+            f"Duration: {duration:.2f} hr"
+        )
+
+        fig.add_trace(go.Bar(
+            x=[duration],
+            y=[row['workflow_name_id']],
+            base=[row['start_hr']],
+            orientation='h',
+            width=0.5,
+            marker=dict(color=bar_color),
+            hovertext=hover_text,
+            hoverinfo='text'
+        ), row=1, col=1)
+
+    updateAxes(fig, df, run_order, grid_color, show_grid)
+
+    if abbreviations and show_abbr:
+        abbr_sort = sorted(abbreviations.items(), key=lambda x: x[1])
+        table_trace = go.Table(
+            header=dict(
+                values=["<b>Abbreviation</b>", "<b>Workflow Name</b>"],
+                fill_color='#717273',
+                align='center',
+                font=dict(color='white', size=12, family='Arial'),
+            ),
+            cells=dict(
+                values=[[val for key, val in abbr_sort], [key for key, val in abbr_sort]],
+                fill_color='#E4E4E5',
+                align='center',
+                font=dict(color='black', size=11, family='Arial'),
+            )
+        )
+        fig.add_trace(table_trace, row=2, col=1)
 
     fig.update_layout(
-        title=fig_title,
-        title_x=0.5,
-        plot_bgcolor='white',
+        title=dict(
+            text=fig_title,
+            x=0.5,
+            font=dict(
+                color=title_col,
+                size=title_size,
+                family='Arial'
+            )
+        ),
+        plot_bgcolor=plot_bgcolor,
+        paper_bgcolor=paper_bgcolor,
         showlegend=False,
-        height=fig_ht
+        height=fig_ht + 250 if (abbreviations and show_abbr) else fig_ht,
+        xaxis=dict(
+            title=dict(text='Hours since start', font=dict(color=axtitle_col,size=axtitle_size,family='Arial')),
+            tickfont=dict(color=axtick_col, size=axtick_size, family='Arial'),
+            type='linear',
+            tickformat='.1f'
+        ),
+        yaxis=dict(
+            title=dict(text='Workflow Name', font=dict(color=axtitle_col, size=axtitle_size, family='Arial')),
+            tickfont=dict(color=axtick_col, size=axtick_size, family='Arial')
+        ),
+        hoverlabel=dict(
+            bgcolor="white",  
+            font_size=10,
+            font_family="Arial",
+            font_color="black",
+        )
     )
 
     return fig
 
-
-
-def ganttPlot(workflow_metrics, config_file=None, png_file_1='gantt_v1.png', png_file_2='gantt_v2.png'):
+def ganttPlot(workflow_metrics, config_file=None, html_file='gantt_v1.html', compress_gaps=False, threshold=24, bar_color='#4682B4', plot_bgcolor='white', show_abbr=True, grid_color='lightgrey', show_grid=True, paper_bgcolor='white', title_col='black', axtitle_col='black', axtick_col='black', title_size=16, axtitle_size=14, axtick_size=12):
     '''
-    Generates two Gantt charts of workflow runtime and saves them as PNG files.
+    Generates Gantt chart of workflow runtime and saves them as HTML files.
     Parameters
     ----------
     workflow_metrics pd.DataFrame: A pandas dataframe containing the workflow metrics.
     config_file Optional[str]: Path to the workflow configuration file containing run order and dependencies. [Optional]
-    png_file_1 str: Path to the first PNG file where the Gantt Chart will be saved.
-    png_file_2 str: Path to the second PNG file where the Gantt Chart will be saved.
+    html_file str: Path to the HTML file where the Gantt Chart will be saved.
     '''
-    generate_second_chart = False
-
-    # Convert start_time and end_time to datetime format  
-    workflow_metrics['start_time'] = pd.to_datetime(workflow_metrics['start_time'], errors = 'coerce')
-    workflow_metrics['end_time'] = pd.to_datetime(workflow_metrics['end_time'], errors = 'coerce')
-
-    # Sort based on start times and create a new column that concatenates workflow names and their run IDs.
-    metrics_sorted = workflow_metrics.sort_values(by='start_time')
-    metrics_sorted['workflow_name_id'] = metrics_sorted['workflow_name'] + '-' + metrics_sorted['workflow_run_id']
-
-    num_workflows = len(metrics_sorted['workflow_name_id'].unique())
-    ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-    unique_samples = workflow_metrics['sample_name'].nunique()
-    arrows_1 = None
-    arrows_2 = None
-    workflow_run_order = None
-
+    run_order, wf_list, abbreviations = (None, None, {})
     if config_file:
-            #Generate the second plot and add dependency links only if workflow dependencies and run order are provided
-            workflow_run_order, dependencies = load_config(config_file)
-            generate_second_chart = True
-            order_map = {workflow: idx for idx, workflow in enumerate(workflow_run_order)}
-            metrics_sorted['run_order_y'] = metrics_sorted['workflow_name'].map(order_map)
-            metrics_sorted_run_order = metrics_sorted.sort_values(by=['run_order_y'])
-            #Add dependency links to first plot
-            arrows_1 = addArrows(metrics_sorted, dependencies) 
-            arrows_2 = addArrows(metrics_sorted_run_order, dependencies)
+        run_order, wf_list, abbreviations = loadConfig(config_file)
+
+    if wf_list:
+        workflow_metrics = workflow_metrics[
+            workflow_metrics['workflow_name'].apply(
+                lambda name: any(name.split('.')[0].startswith(wf) for wf in wf_list)
+            )
+        ].copy()
+    
+    def abbr_name(name):
+        for prefix, abbr in abbreviations.items():
+            if name.startswith(prefix):
+                suffix = name[len(prefix):]
+                return f"{abbr}{suffix}"
+        return name
+
+    # Apply abbreviations to workflow names
+    workflow_metrics['workflow_fname'] = workflow_metrics['workflow_name']
+    workflow_metrics['workflow_name'] = workflow_metrics['workflow_name'].apply(abbr_name)
+    workflow_metrics['workflow_name_id'] = workflow_metrics['workflow_name'] + '-' + workflow_metrics['workflow_run_id']
+
+    def prepareChart(sample_df, sample_name, compress_gaps=False):
+        """
+        Helper function to prepare, create, and save chart for a given sample
+        """
+        df = sample_df.copy()
+
+        # Ensure datetime and calculate hours
+        df[['start_time', 'end_time']] = df[['start_time', 'end_time']].apply(pd.to_datetime, errors='coerce')
+        start = df['start_time'].min()
+        df.loc[:, 'start_hr'] = (df['start_time'] - start).dt.total_seconds() / 3600
+        df.loc[:, 'end_hr'] = (df['end_time'] - start).dt.total_seconds() / 3600
+
+        if compress_gaps:
+            df = compressGaps(df, threshold)
+        
+        if run_order:
+            order_map = {}
+
+            for i, workflow in enumerate(run_order):
+                for fullname in df['workflow_fname'].unique():
+                    if fullname.startswith(workflow):
+                        abbr = abbr_name(fullname)
+                        order_map[abbr] = i
+
+            df['run_order_y'] = df['workflow_name'].map(order_map).fillna(len(run_order) + 1)
+            df = df.sort_values(by='run_order_y')
+
+        num_workflows = df['workflow_name_id'].nunique()
+        ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
+
+        title = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
+        fig = createPlot(df, ht, title, run_order, abbreviations, bar_color, plot_bgcolor, show_abbr, grid_color, show_grid, paper_bgcolor, title_col, axtitle_col, axtick_col, title_size, axtitle_size, axtick_size)
+        html_out = f"{html_file.replace('.html', f'_{sample_name}.html')}"
+        fig.write_html(html_out)
+        logging.info(f"Gantt chart saved to {html_out}")
+
+    unique_samples = workflow_metrics['sample_name'].nunique()
 
     if unique_samples == 1:
         sample_name = workflow_metrics['sample_name'].iloc[0]
-        title_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
-        fig_1 = createPlot(metrics_sorted, ht, title_1, png_file_1, arrows_1)
-        png = f"{png_file_1.replace('.png', f'_{sample_name}.png')}"
-        fig_1.write_image(png)
-        print(f"Workflow run metrics saved to {png_file_1}")
-        if generate_second_chart:
-            title_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample_name})'
-            fig_2 = createPlot(metrics_sorted_run_order, ht, title_2, png_file_2, arrows_2, workflow_run_order)
-            png = f"{png_file_2.replace('.png', f'_{sample_name}.png')}"
-            fig_2.write_image(png)
-            print(f"Workflow run metrics by run order saved to {png_file_2}")
-
+        prepareChart(workflow_metrics, sample_name, compress_gaps)
     else:
-        for sample in workflow_metrics['sample_name'].unique():
-            sample_metrics = metrics_sorted[metrics_sorted['sample_name'] == sample]
-            num_workflows = len(sample_metrics['workflow_name_id'].unique())
-            ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-            # Chart 1
-            title_sample_1 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
-            sample_png = f"{png_file_1.replace('.png', f'_{sample}.png')}"
-            fig_1_sample = createPlot(sample_metrics, ht, title_sample_1, sample_png, arrows_1)
-            fig_1_sample.write_image(sample_png)
-            print(f"Workflow run metrics for sample {sample} saved to {sample_png}")
-
-            if generate_second_chart:
-                sample_metrics = metrics_sorted_run_order[metrics_sorted_run_order['sample_name'] == sample]
-                num_workflows = len(sample_metrics['workflow_name_id'].unique())
-                ht = max(400, num_workflows * 30) if num_workflows > 1 else 200
-                # Chart 2
-                title_sample_2 = f'Gantt Chart of Workflow Runtime (Sample: {sample})'
-                sample_png = f"{png_file_2.replace('.png', f'_{sample}.png')}"
-                fig_2_sample = createPlot(sample_metrics,ht, title_sample_2, sample_png, arrows_2, workflow_run_order)
-                fig_2_sample.write_image(sample_png)
-                print(f"Workflow run metrics by run order for sample {sample} saved to {sample_png}")
-
-
+        for sample_name in workflow_metrics['sample_name'].unique():
+            sample_df = workflow_metrics[workflow_metrics['sample_name'] == sample_name]
+            prepareChart(sample_df, sample_name, compress_gaps)
 
 def generateCSV(workflow_metrics, csv_file='workflow_report.csv'):
     '''
@@ -366,11 +452,9 @@ def generateCSV(workflow_metrics, csv_file='workflow_report.csv'):
     csv_file str: The CSV filename/path where the metrics are to be stored. 
     '''
     workflow_metrics.to_csv(csv_file, mode='w', header=True, index=False)
-    print(f"Workflow run metrics saved to {csv_file}")
+    logging.info(f"Workflow run metrics saved to {csv_file}")        
 
-        
-
-def processInput(input_file, config_file=None):
+def processInput(input_file, config_file=None, compress_gaps=False, bar_color='#4682B4', plot_bgcolor='white', show_abbr=True, grid_color='lightgrey', show_grid=True, paper_bgcolor='white', title_col='black', axtitle_col='black', axtick_col='black', title_size=16, axtitle_size=14, axtick_size=12):
     '''
     Processes an input JSON or Text file to retrieve workflow run ids.
     Parameters
@@ -380,22 +464,22 @@ def processInput(input_file, config_file=None):
     '''
     # Check if file exists
     if not os.path.isfile(input_file):
-        print(f"File {input_file} not found.")
+        logging.error(f"File {input_file} not found.")
         return
 
     # Check if the input is a JSON or TXT file 
     if input_file.endswith('.json'):
-        print("Processing JSON for workflow ids")
+        logging.info("Processing JSON for workflow ids")
         try:
             with open(input_file, 'r') as file:
                 input_data = json.load(file)
             workflow_ids = extractWfId(input_data)
         except Exception as e:
-            print(f"Error loading JSON file: {e}")
+            logging.error(f"Error loading JSON file: {e}")
             return
 
     elif input_file.endswith('.txt'):
-        print("Processing TXT for workflow ids")
+        logging.info("Processing TXT for workflow ids")
         with open(input_file, 'r') as file:
             lines = file.readlines()
         header_found = False
@@ -410,17 +494,17 @@ def processInput(input_file, config_file=None):
         workflow_ids = list(set(workflow_ids))
 
     else:
-        print(f"Error: The input must be either '.json' or '.txt' file")
+        logging.error(f"Error: The input must be either '.json' or '.txt' file")
         return
 
     if not workflow_ids:
-        print("No workflow IDs found.")
+        logging.warning("No workflow IDs found.")
         return
     
     fp_path = "/scratch2/groups/gsi/production/vidarr/vidarr_files_report_latest.tsv.gz"
     df_sname = queryFpr(fp_path, workflow_ids)
     
-    print("Extracting workflow metrics for workflow_ids")
+    logging.info("Extracting workflow metrics for workflow_ids")
     data = queryMongoDB(workflow_ids)
 
     workflow_metrics = None
@@ -428,45 +512,163 @@ def processInput(input_file, config_file=None):
         workflow_metrics = parseJson(data, workflow_metrics)
 
     if workflow_metrics is not None and df_sname is not None:
-        workflow_metrics = pd.merge(workflow_metrics, df_sname, left_on='workflow_run_id', right_on='workflow_run_id', how='left')
-        ganttPlot(workflow_metrics, config_file)
-        generateCSV(workflow_metrics)
-        
+        workflow_metrics = pd.merge(workflow_metrics, df_sname, left_on='workflow_run_id', right_on='workflow_run_id', how='left'). drop_duplicates()
+    
+    def append_tissue(row):
+        if row['workflow_name'] == 'bamMergePreprocessing':
+            return f"{row['workflow_name']}.{row['tissue_type']}"
+        else:
+            return row['workflow_name']
+
+    workflow_metrics['workflow_name'] = workflow_metrics.apply(append_tissue, axis=1)
+    workflow_metrics = workflow_metrics.drop(columns=['tissue_type'])   
+
+    if workflow_metrics is None or workflow_metrics.empty:
+        logging.warning("No workflow metrics to process. Exiting.")
+        return
+
+    ganttPlot(workflow_metrics, config_file, compress_gaps=compress_gaps, bar_color=bar_color, plot_bgcolor=plot_bgcolor, show_abbr=show_abbr, grid_color=grid_color, show_grid=show_grid, paper_bgcolor=paper_bgcolor, title_col=title_col, axtitle_col=axtitle_col, axtick_col=axtick_col, title_size=title_size, axtitle_size=axtitle_size, axtick_size=axtick_size)
+    generateCSV(workflow_metrics)       
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description = 'Generate gantt charts from workflow run metrics'
+        description = 'Generate gantt charts from workflow run metrics',
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    # Add the argument for the input JSON file and the workflow configuration file
-    parser.add_argument(
+    # Add the argument for the input JSON of TXT file
+    required = parser.add_argument_group('Required Arguments')
+    required.add_argument(
         '-i', '--input',
         type = str,
         help = 'Path to the input JSON or TXT file containing workflow IDs',
         required = True
     )
 
+    # Optional Arguments
     parser.add_argument(
         '--config',
         type = str,
-        help = 'Path to the workflow configuration file containing run order and dependencies. [Optional]',
+        help = 'Path to the workflow configuration file containing run order, abbreviations and dependencies',
         required = False
     )
 
+    parser.add_argument(
+        '--compress-gaps',
+        action='store_true',
+        help='Compress long idle periods in Gantt chart'
+    )
+    parser.add_argument(
+        '--bar-color',
+        type=str,
+        default='#4682B4',
+        help='Color of the bars in the Gantt chart (default: #4682B4)'
+    )
+
+    parser.add_argument(
+        '--plot-bgcolor',
+        type=str,
+        default='white',
+        help='Background color of the plot area (default: white)'
+    )
+
+    parser.add_argument(
+        '--no-abbr-table',
+        action='store_true',
+        help='If set, hides the abbreviation table below the Gantt chart'
+    )
+
+    parser.add_argument(
+        '--grid-color',
+        type=str,
+        default='lightgrey',
+        help='Color of gridlines on the plot (default: lightgrey)'
+    )
+
+    parser.add_argument(
+        '--no-grid',
+        action='store_true',
+        help='If set, hides gridlines from the plot'
+    )
+
+    parser.add_argument(
+        '--paper-bgcolor',
+        type=str,
+        default='white',
+        help='Background color of the full figure (default: white)'
+    )
+
+    parser.add_argument(
+        '--title-col',
+        type=str,
+        default='black',
+        help='Color of the title text (default: black)'
+    )
+
+    parser.add_argument(
+        '--axtitle-col',
+        type=str,
+        default='black',
+        help='Color of the axis title text (default: black)'
+    )
+
+    parser.add_argument(
+        '--axtick-col',
+        type=str,
+        default='black',
+        help='Color of the axis tick text (default: black)'
+    )
+
+    parser.add_argument(
+        '--title-size',
+        type=int,
+        default=16,
+        help='Font size of the title text (default: 16)'
+    )
+
+    parser.add_argument(
+        '--axtitle-size',
+        type=int,
+        default=14,
+        help='Font size of the axis title text (default: 14)'
+    )
+
+    parser.add_argument(
+        '--axtick-size',
+        type=int,
+        default=12,
+        help='Font size of the axis tick text (default: 12)'
+    )
+
     # Add custom message to show usage
-    parser.epilog = '''
-    Example Usage: pipeline-rt -i /path/to/input/JSON 
-    OR
-    pipeline-rt -i /path/to/input/TXT
+    parser.epilog = f'''
+    Example Usage: 
+    pipeline-rt -i /path/to/input.json --compress-gaps
+    pipeline-rt -i /path/to/input.txt --config /path/to/config.json --compress-gaps
     '''
 
     # Parse arguments
     args = parser.parse_args()
-    input_file = args.input
 
     if len(vars(args)) == 0:
         parser.print_help()
         exit(0)
     else:
-        print("Reading input")
-        processInput(input_file, config_file = args.config)
+        logging.info("Reading input")
+        processInput(
+            input_file = args.input, 
+            config_file = args.config, 
+            compress_gaps=args.compress_gaps, 
+            bar_color=args.bar_color, 
+            plot_bgcolor=args.plot_bgcolor, 
+            show_abbr=not args.no_abbr_table, 
+            grid_color=args.grid_color, 
+            show_grid=not args.no_grid, 
+            paper_bgcolor=args.paper_bgcolor, 
+            title_col=args.title_col, 
+            axtitle_col=args.axtitle_col, 
+            axtick_col=args.axtick_col, 
+            title_size=args.title_size, 
+            axtitle_size=args.axtitle_size, 
+            axtick_size=args.axtick_size
+        )
